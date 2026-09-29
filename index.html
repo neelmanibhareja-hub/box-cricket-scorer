@@ -599,6 +599,21 @@ function getRoute() {
   const p = h.split('/');
   return {page:p[0], params:p.slice(1)};
 }
+// A match left "live" for over 12 h was abandoned, not being scored — don't advertise it as LIVE.
+function _matchIsStale(m) {
+  if (!m || m.status !== 'live' || !m.created_at) return false;
+  const t = Date.parse(m.created_at.replace(' ', 'T') + 'Z');   // server stores UTC "YYYY-MM-DD HH:MM"
+  return isFinite(t) && Date.now() - t > 12 * 3600 * 1000;
+}
+function _matchWhen(m) {
+  if (!m || !m.created_at) return '';
+  const d = new Date(Date.parse(m.created_at.replace(' ', 'T') + 'Z'));
+  if (isNaN(d)) return '';
+  const today = new Date(); const y = new Date(Date.now() - 864e5);
+  if (d.toDateString() === today.toDateString()) return 'Today';
+  if (d.toDateString() === y.toDateString()) return 'Yesterday';
+  return d.getDate() + ' ' + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
+}
 // True while the user is still on this page — a slow load must not paint over a page they moved to.
 function _stillOn(page, id) {
   const r = getRoute();
@@ -634,6 +649,7 @@ function _setTab(activeId) {
     if(el) el.style.color = id === activeId ? '#d0021b' : 'var(--text2)';
   });
 }
+const _HIDE_TAB_PAGES = ['scoring','toss','openers','setup','quick-setup','team-draft','score-only','toss-only','live'];
 function _showTabBar(show) {
   const tb = document.getElementById('cb-bottom-tabs');
   if(!tb) return;
@@ -679,8 +695,7 @@ function route() {
     live: ()=>renderLiveView(params[0]),
     highlights: renderHighlightsGallery
   };
-  const _hideTabPages = ['scoring','toss','openers','setup','quick-setup','team-draft','score-only','toss-only','live'];
-  _showTabBar(!_hideTabPages.includes(page));
+  _showTabBar(!_HIDE_TAB_PAGES.includes(page));
   const _tabMap = {home:'tab-home',players:'tab-players',summary:'tab-matches',scorecard:'tab-matches',timeline:'tab-matches',series:'tab-matches'};
   _setTab(_tabMap[page]||'tab-home');
   (routes[page]||renderHome)();
@@ -907,8 +922,8 @@ async function renderHome() {
         <div style="padding:0 6px 10px">
           <div class="cb-swipe-strip" id="cb-match-strip" onscroll="_cbStripScroll(this,${JSON.stringify(ms.length)})">
             ${ms.map((m,mi)=>{
-              const isLive=m.status==='live',isDone=m.status==='completed';
-              const nav=isLive?`navigate('live/${m.match_id}')`:isDone?`navigate('summary/${m.match_id}')`:m.batting_first?`navigate('openers/${m.match_id}')`:`navigate('toss/${m.match_id}')`;
+              const isStale=_matchIsStale(m),isLive=m.status==='live'&&!isStale,isDone=m.status==='completed';
+              const nav=(m.status==='live')?`navigate('live/${m.match_id}')`:isDone?`navigate('summary/${m.match_id}')`:m.batting_first?`navigate('openers/${m.match_id}')`:`navigate('toss/${m.match_id}')`;
               const i1=m.inn1,i2=m.inn2;
               const batFirst=m.batting_first||(i1?.batting_team)||m.team_a;
               const batSecond=batFirst===m.team_a?m.team_b:m.team_a;
@@ -923,11 +938,13 @@ async function renderHome() {
                 :isDone?'<span style="color:#888">Match Tied</span>'
                 :isLive&&i2?'<span style="color:#d0021b;font-weight:700">'+(i2.batting_team||m.team_b)+' need '+need+' off '+bl+' balls</span>'
                 :isLive?'<span style="color:#16a34a">Innings in progress</span>'
+                :isStale?'<span style="color:#888">Not finished · tap to open</span>'
                 :'<span style="color:#888">Tap to start</span>';
               return '<div class="cb-swipe-card-outer"><div class="cb-swipe-card-inner" onclick="'+nav+'">'
                 +'<div style="background:#1a1a2e;padding:8px 14px;display:flex;justify-content:space-between;align-items:center">'
-                +'<span style="color:rgba(255,255,255,0.6);font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase">BOX CRICKET · '+m.overs+' OV</span>'
-                +(isLive?'<span style="display:flex;align-items:center;gap:4px;color:#ff4444;font-size:11px;font-weight:700"><span style="width:6px;height:6px;border-radius:50%;background:#ff4444;animation:cb-pulse 1s infinite"></span>LIVE</span>'
+                +'<span style="color:rgba(255,255,255,0.72);font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase">BOX CRICKET · '+m.overs+' OV'+(_matchWhen(m)?' · '+_matchWhen(m):'')+'</span>'
+                +(isStale?'<span style="background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.72);font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">UNFINISHED</span>'
+                  :isLive?'<span style="display:flex;align-items:center;gap:4px;color:#ff4444;font-size:11px;font-weight:700"><span style="width:6px;height:6px;border-radius:50%;background:#ff4444;animation:cb-pulse 1s infinite"></span>LIVE</span>'
                   :isDone?'<span style="background:rgba(255,255,255,0.15);color:rgba(255,255,255,0.7);font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">RESULT</span>'
                   :'<span style="background:rgba(255,255,255,0.15);color:#fbbf24;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">UPCOMING</span>')
                 +'</div>'
@@ -1010,7 +1027,8 @@ async function renderHome() {
         <div style="background:#fff;border:1px solid #e8e8e8;border-radius:12px;overflow:hidden;touch-action:manipulation;box-shadow:0 1px 4px rgba(0,0,0,0.06)">
           <div class="flex justify-between items-center px-3 pt-2.5 pb-1">
             <span style="color:#888;font-size:10px;font-weight:600;letter-spacing:.05em;text-transform:uppercase">BOX CRICKET \u00b7 ${m.overs} ov${m.ground?.name?' \u00b7 \ud83c\udfdf '+m.ground.name:''}${m.created_at?' \u00b7 '+(()=>{const s=m.created_at.replace('T',' ');const p=s.split(/[- :]/);const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];const day=parseInt(p[2]||0);const mon=months[parseInt(p[1]||1)-1]||'';const yr=String(p[0]||'').slice(2);const h=p[3]||'';const mi=p[4]||'';return day+' '+mon+' \''+yr+(h?' '+h+':'+mi:'');})():''}</span>
-            ${isLive ? '<span style="display:flex;align-items:center;gap:4px;color:#dc2626;font-size:11px;font-weight:700"><span style="width:7px;height:7px;border-radius:50%;background:#dc2626;display:inline-block"></span>LIVE</span>'
+            ${_matchIsStale(m) ? '<span style="background:#e5e7eb;color:#4b5563;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px">UNFINISHED</span>'
+              : isLive ? '<span style="display:flex;align-items:center;gap:4px;color:#dc2626;font-size:11px;font-weight:700"><span style="width:7px;height:7px;border-radius:50%;background:#dc2626;display:inline-block"></span>LIVE</span>'
               : isDone ? '<span style="background:#e5e7eb;color:#6b7280;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px">RESULT</span>'
               : '<span style="background:#fef3c7;color:#b45309;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px">UPCOMING</span>'}
           </div>
@@ -6782,7 +6800,9 @@ async function doConfirmWicket(newBat) {
 
 async function undoLastBall() {
   if(state.pendingRequest) return;
-  if(!confirm('Undo last ball?')) return;
+  const _lb = (state.thisOver||[])[ (state.thisOver||[]).length - 1 ];
+  const _what = _lb ? (_lb.isWicket ? 'the wicket' : ballSymbol(_lb) === '\u2022' ? 'the dot ball' : ballSymbol(_lb) + (/^[0-9]+$/.test(ballSymbol(_lb)) ? (ballSymbol(_lb)==='1'?' run':' runs') : '')) : 'the last ball';
+  if(!confirm('Undo ' + _what + '?\n' + (state.score ? state.score.runs + '/' + state.score.wickets + ' (' + formatOvers(state.score.balls) + ')' : ''))) return;
   setPending(true);
   try {
     const res = await apiCall('undo_ball', {match_id:state.matchId, innings:state.innings});
@@ -10792,11 +10812,19 @@ function _dismissPush() {
   if (overlay) overlay.remove();
 }
 
-// Show prompt 2 seconds after app loads
-setTimeout(() => {
-  if (document.readyState === 'complete') _showPushPrompt();
-  else window.addEventListener('load', _showPushPrompt);
-}, 2000);
+// Ask only when someone is following a match or looking at a result — not on first open,
+// and never over the scoring pad.
+window.addEventListener('hashchange', () => {
+  const pg = getRoute().page;
+  if (pg === 'live' || pg === 'summary') setTimeout(() => {
+    const now = getRoute().page;
+    if (now === 'live' || now === 'summary') _showPushPrompt();
+  }, 6000);
+});
+setTimeout(() => {                       // opened straight from a shared live link
+  const pg = getRoute().page;
+  if (pg === 'live' || pg === 'summary') _showPushPrompt();
+}, 6000);
 
 // Handle navigate messages from service worker notification click
 navigator.serviceWorker?.addEventListener('message', e => {
@@ -11195,5 +11223,10 @@ if(window.speechSynthesis) {
     <span style="font-size:10px;font-weight:600">More</span>
   </button>
 </div>
+<script>
+  // The first route() ran before this bar existed, so opening/refreshing straight onto
+  // the scoring screen left Home/+/Matches under the scorer's thumb. Apply it now.
+  try { _showTabBar(!_HIDE_TAB_PAGES.includes(getRoute().page)); } catch(e) {}
+</script>
 </body>
 </html>
