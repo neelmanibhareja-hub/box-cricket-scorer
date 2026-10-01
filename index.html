@@ -4786,6 +4786,48 @@ function _playCelebAudio(type) {
   } catch(e) {}
 }
 
+/* BC-RIVE-2026-10-01: the SIX / FOUR / WICKET celebrations are Rive animations (rive/six.riv,
+   four.riv, wicket.riv: vector only, a few KB each, with our own copy of the runtime in rive/).
+   They draw INSIDE the existing full-screen flash, in place of the big number and label; the
+   batter's name, the sound, the vibration and the timing are unchanged, and nothing touches the
+   scoring pad. The runtime and the three files are fetched a few seconds after the app opens and
+   kept in memory, so a burst starts on the same frame as the tap. Not ready, reduced motion, or
+   any error: showCelebration falls back to the number and label exactly as before. */
+const BC_RIVE = { ready:false, loading:false, failed:false, buf:{},
+  // next to the page on any static host; the n8n webhook serves only the HTML, so there it uses the published copy
+  base: (location.pathname.indexOf('/webhook/') >= 0 ? 'https://neelmanibhareja-hub.github.io/box-cricket-scorer/' : '') + 'rive/' };
+function bcRiveLoad() {
+  if(BC_RIVE.ready || BC_RIVE.loading || BC_RIVE.failed) return;
+  try { if(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) { BC_RIVE.failed = true; return; } } catch(e) {}
+  BC_RIVE.loading = true;
+  const sc = document.createElement('script');
+  sc.src = BC_RIVE.base + 'rive.js?v=2.43.1'; sc.async = true;
+  sc.onerror = () => { BC_RIVE.failed = true; };
+  sc.onload = () => {
+    try {
+      rive.RuntimeLoader.setWasmUrl(BC_RIVE.base + 'rive.wasm?v=2.43.1');
+      Promise.all(['six','four','wicket'].map(n =>
+        fetch(BC_RIVE.base + n + '.riv?v=1').then(r => { if(!r.ok) throw new Error(n); return r.arrayBuffer(); }).then(b => { BC_RIVE.buf[n] = b; })
+      )).then(() => { BC_RIVE.ready = true; }).catch(() => { BC_RIVE.failed = true; });
+    } catch(e) { BC_RIVE.failed = true; }
+  };
+  document.head.appendChild(sc);
+}
+window.addEventListener('load', () => setTimeout(bcRiveLoad, 2500));
+function bcRiveBurst(type, host) {
+  if(!BC_RIVE.ready || !BC_RIVE.buf[type] || typeof rive === 'undefined') return null;
+  const cv = document.createElement('canvas');
+  cv.style.cssText = 'width:min(78vw,46vh,420px);height:min(78vw,46vh,420px);display:block;pointer-events:none';
+  host.appendChild(cv);
+  try {
+    const r = new rive.Rive({ buffer: BC_RIVE.buf[type].slice(0), canvas: cv, stateMachines: 'Main', autoplay: true,
+      layout: new rive.Layout({ fit: rive.Fit.Contain }),
+      onLoad: () => { try { r.resizeDrawingSurfaceToCanvas(); } catch(e) {} },
+      onLoadError: () => { cv.remove(); } });
+    return r;
+  } catch(e) { cv.remove(); return null; }
+}
+
 function showCelebration(type) {
   _playCelebAudio(type);
   document.querySelectorAll('.celeb-overlay').forEach(e => e.remove());
@@ -4847,17 +4889,21 @@ function showCelebration(type) {
   const content = document.createElement('div');
   content.style.cssText = 'position:relative;display:flex;flex-direction:column;align-items:center;gap:4px;z-index:1';
 
+  // BC-RIVE: SIX / FOUR / WICKET play as a Rive burst when it is ready; otherwise the number and label below
+  const _burst = bcRiveBurst(type, content);
+  if(!_burst) {
   // Big number / emoji
-  const numEl = document.createElement('div');
-  numEl.style.cssText = `font-size:${type==='six'||type==='four'?'10rem':'5rem'};font-weight:900;color:${cfg.numColor};line-height:0.9;text-shadow:0 0 60px ${cfg.glow},0 0 120px ${cfg.glow};animation:${cfg.anim} 0.55s cubic-bezier(0.34,1.56,0.64,1) forwards;font-family:system-ui,-apple-system,sans-serif`;
-  numEl.textContent = cfg.num;
-  content.appendChild(numEl);
+    const numEl = document.createElement('div');
+    numEl.style.cssText = `font-size:${type==='six'||type==='four'?'10rem':'5rem'};font-weight:900;color:${cfg.numColor};line-height:0.9;text-shadow:0 0 60px ${cfg.glow},0 0 120px ${cfg.glow};animation:${cfg.anim} 0.55s cubic-bezier(0.34,1.56,0.64,1) forwards;font-family:system-ui,-apple-system,sans-serif`;
+    numEl.textContent = cfg.num;
+    content.appendChild(numEl);
 
-  // Label (SIX! / FOUR! / WICKET!)
-  const labelEl = document.createElement('div');
-  labelEl.style.cssText = `font-size:1.75rem;font-weight:900;color:${cfg.labelColor};letter-spacing:0.12em;text-transform:uppercase;text-shadow:0 2px 12px rgba(0,0,0,0.5);animation:subSlide 0.35s 0.25s ease-out both`;
-  labelEl.textContent = cfg.label;
-  content.appendChild(labelEl);
+    // Label (SIX! / FOUR! / WICKET!)
+    const labelEl = document.createElement('div');
+    labelEl.style.cssText = `font-size:1.75rem;font-weight:900;color:${cfg.labelColor};letter-spacing:0.12em;text-transform:uppercase;text-shadow:0 2px 12px rgba(0,0,0,0.5);animation:subSlide 0.35s 0.25s ease-out both`;
+    labelEl.textContent = cfg.label;
+    content.appendChild(labelEl);
+  }
 
   // Player name
   if(playerName) {
@@ -4869,7 +4915,7 @@ function showCelebration(type) {
 
   wrap.appendChild(content);
   document.body.appendChild(wrap);
-  setTimeout(() => wrap.remove(), dur);
+  setTimeout(() => { try{ if(_burst) _burst.cleanup(); }catch(e){} wrap.remove(); }, dur);
 
   try { playCueSound(type); } catch(e) {}
   try { cueVibrate(type); } catch(e) {}
