@@ -4806,9 +4806,12 @@ function bcRiveLoad() {
   sc.onload = () => {
     try {
       rive.RuntimeLoader.setWasmUrl(BC_RIVE.base + 'rive.wasm?v=2.43.1');
-      Promise.all(['six','four','wicket'].map(n =>
+      // also wake the engine itself (rive.wasm) now: left alone it only downloads when the first
+      // burst fires, and the first six of a session would start late
+      const engine = rive.RuntimeLoader.awaitInstance ? rive.RuntimeLoader.awaitInstance() : new Promise(res => rive.RuntimeLoader.getInstance(res));
+      Promise.all([engine].concat(['six','four','wicket'].map(n =>
         fetch(BC_RIVE.base + n + '.riv?v=1').then(r => { if(!r.ok) throw new Error(n); return r.arrayBuffer(); }).then(b => { BC_RIVE.buf[n] = b; })
-      )).then(() => { BC_RIVE.ready = true; }).catch(() => { BC_RIVE.failed = true; });
+      ))).then(() => { BC_RIVE.ready = true; }).catch(() => { BC_RIVE.failed = true; });
     } catch(e) { BC_RIVE.failed = true; }
   };
   document.head.appendChild(sc);
