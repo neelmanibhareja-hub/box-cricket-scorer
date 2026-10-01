@@ -4756,19 +4756,52 @@ function _shoutText(text, pitch, rate) {
   } catch(e) {}
 }
 
+/* BC-VOICE-2026-10-01: the calls are recorded clips (a commentator voice, audio/*.mp3, ~15 KB each)
+   instead of the phone's text-to-speech, which sounded robotic and different on every phone. Each
+   event has two English and two Hinglish calls, played in turn so it does not repeat. The clips are
+   fetched and decoded shortly after the app opens; until then, or on any error, the old spoken call
+   is used. The crowd noise and tones are unchanged. */
+const BC_VOICE = { buf:{}, next:{},
+  base: (location.pathname.indexOf('/webhook/') >= 0 ? 'https://neelmanibhareja-hub.github.io/box-cricket-scorer/' : '') + 'audio/',
+  set: { six:['six-en1','six-hi1','six-en2','six-hi2'], four:['four-en1','four-hi1','four-en2','four-hi2'], wicket:['out-en1','out-hi1','out-en2','out-hi2'] } };
+function bcVoiceLoad() {
+  if(BC_VOICE.loading) return; BC_VOICE.loading = true;
+  let ctx; try { ctx = _getAudCtx(); } catch(e) { return; }
+  Object.keys(BC_VOICE.set).forEach(t => BC_VOICE.set[t].forEach(n => {
+    fetch(BC_VOICE.base + n + '.mp3?v=1').then(r => { if(!r.ok) throw 0; return r.arrayBuffer(); })
+      .then(b => new Promise((res, rej) => ctx.decodeAudioData(b, res, rej)))
+      .then(a => { BC_VOICE.buf[n] = a; }).catch(() => {});
+  }));
+}
+window.addEventListener('load', () => setTimeout(bcVoiceLoad, 3000));
+function _shoutClip(type) {
+  try {
+    const list = BC_VOICE.set[type]; if(!list) return false;
+    for(let k = 0; k < list.length; k++) {          // the next call in turn that has finished loading
+      const i = ((BC_VOICE.next[type] || 0) + k) % list.length, a = BC_VOICE.buf[list[i]];
+      if(a) {
+        const ctx = _getAudCtx(), src = ctx.createBufferSource(), g = ctx.createGain();
+        src.buffer = a; g.gain.value = 1.0; src.connect(g); g.connect(ctx.destination); src.start();
+        BC_VOICE.next[type] = i + 1; return true;
+      }
+    }
+  } catch(e) {}
+  return false;
+}
+
 function _playCelebAudio(type) {
   try {
     const ctx = _getAudCtx();
     const t = ctx.currentTime;
 
     if(type === 'four') {
-      _shoutText('FOUR!', 1.5, 1.1);
+      _shoutClip('four') || _shoutText('FOUR!', 1.5, 1.1);
       _audNoise(ctx, 0.28, 1.4, 1100, 1.0);
       [[293.66, 0], [369.99, 0.13], [440, 0.26]].forEach(([f, dt]) =>
         _audTone(ctx, f, 'sawtooth', t + dt, 0.45, 0.14));
 
     } else if(type === 'six') {
-      _shoutText('SIX!', 1.8, 0.95);
+      _shoutClip('six') || _shoutText('SIX!', 1.8, 0.95);
       _audNoise(ctx, 0.50, 2.8,  800, 0.8);
       _audNoise(ctx, 0.22, 2.2, 2200, 1.5);
       _audNoise(ctx, 0.18, 1.8,  300, 0.6);
@@ -4778,7 +4811,7 @@ function _playCelebAudio(type) {
         .forEach(([f,dt]) => _audTone(ctx, f, 'sawtooth', t + dt, 0.55, 0.18));
 
     } else if(type === 'wicket') {
-      _shoutText('OUT!', 0.9, 0.85);
+      _shoutClip('wicket') || _shoutText('OUT!', 0.9, 0.85);
       _audNoise(ctx, 0.32, 2.2, 550, 1.1);
       [[80, 0, 0.60], [60, 0.18, 0.55], [45, 0.38, 0.50]]
         .forEach(([f, dt, g]) => _audTone(ctx, f, 'sine', t + dt, 0.65, g));
