@@ -1124,8 +1124,10 @@ function shareOnWhatsApp(matchLabel, inviteCode, matchId) {
   window.open('https://wa.me/?text=' + encodeURIComponent(msg), '_blank');
 }
 
+// The app's public address (GitHub Pages). The old Netlify site still answers but is a stale copy - never share it.
+const BC_APP_URL = 'https://neelmanibhareja-hub.github.io/box-cricket-scorer/';
 function _shareLiveView(matchId, label) {
-  const link = 'https://box-cricket-scorer.netlify.app/#live/' + matchId;
+  const link = BC_APP_URL + '#live/' + matchId;
   const msg = '\u{1F3CF} *' + label + '* — Watch Live & Place Bets \u{1F3B2}\n\n\u{1F4F1} ' + link + '\n\nOpen → \u{1F3B2} Odds tab to bet on players!';
   if (navigator.share) {
     navigator.share({ title: label + ' — Live', text: msg, url: link }).catch(() => {});
@@ -8666,7 +8668,7 @@ async function hlDownload() {
 
 async function hlShareAllHighlights(matchId) {
   const title = '🏏 Box Cricket Highlights';
-  const url = location.origin + '/#summary/' + matchId;
+  const url = BC_APP_URL + '#summary/' + matchId;   // location.origin alone drops the /box-cricket-scorer/ folder
   const text = '🏏 Watch the match highlights → ' + url;
   try {
     if(navigator.share) {
@@ -11159,7 +11161,7 @@ function _checkOnboarding() {
 
 // Share app
 function shareApp() {
-  const url = 'https://box-cricket-scorer.netlify.app';
+  const url = BC_APP_URL;
   const text = '🏏 Join me on Box Cricket Scorer — score and watch live box cricket matches!';
   if(navigator.share) {
     navigator.share({ title: 'Box Cricket Scorer', text, url }).catch(() => {});
