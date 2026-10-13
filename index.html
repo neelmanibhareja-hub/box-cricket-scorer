@@ -703,6 +703,12 @@ function route() {
   _logVisit(page, params[0]||'');
 }
 window.addEventListener('hashchange', route);
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden) return;
+  const pg = getRoute().page;
+  if(pg === 'scoring' && state.matchId) { _syncDelay = SYNC_MIN; refreshScoring(false); }
+  else if(pg === 'live' && typeof window._lvRefresh === 'function') window._lvRefresh(true);
+});
 
 function renderSeriesCards(allMatches) {
   const allSeries = JSON.parse(localStorage.getItem('cricket_series')||'{}');
@@ -3187,20 +3193,46 @@ let _syncTimer = null;
 function isAnyModalOpen() {
   return document.querySelectorAll('.modal-overlay[style*="flex"], .modal[style*="flex"]').length > 0;
 }
+// Battery + glitch control. The scorer's own taps already bring back fresh state, so this
+// poll only matters when someone else changes the match. It therefore:
+//  - sleeps while the screen is off / app is in the background,
+//  - backs off 5s -> 30s while nothing external changes, snaps back to 5s when something does,
+//  - never rebuilds the screen unless the server state really differs (see refreshScoring).
+const SYNC_MIN = 5000, SYNC_MAX = 30000;
+let _syncDelay = SYNC_MIN, _syncSeqSeen = 0;
+// A finger on the glass must never have its button rebuilt under it.
+let _touchUntil = 0;
+['touchstart','touchmove','pointerdown'].forEach(ev => document.addEventListener(ev, () => { _touchUntil = Date.now() + 600; }, {passive:true, capture:true}));
+['touchend','touchcancel','pointerup'].forEach(ev => document.addEventListener(ev, () => { _touchUntil = Date.now() + 400; }, {passive:true, capture:true}));
+function _touchBusy() { return Date.now() < _touchUntil; }
+
 function startAutoSync() {
   stopAutoSync();
-  _syncTimer = setInterval(async () => {
-    if (isAnyModalOpen() || state.pendingRequest || _phaserGame) return;
-    try {
-      const prevHash = `${state.score?.runs}-${state.score?.wickets}-${state.score?.balls}`;
-      await refreshScoring();
-      const newHash = `${state.score?.runs}-${state.score?.wickets}-${state.score?.balls}`;
-      if(newHash !== prevHash && navigator.vibrate) navigator.vibrate(100);
-    } catch(e) { /* ignore sync errors */ }
-  }, 4000);
+  _syncDelay = SYNC_MIN;
+  const tick = async () => {
+    _syncTimer = null;
+    if(!_onScoringPage()) return;                       // left the page: stop for good
+    let changed = false;
+    if(!document.hidden && !isAnyModalOpen() && !state.pendingRequest && !_phaserGame && !_touchBusy()) {
+      try {
+        if(_syncSeqSeen !== _apiWriteSeq) { _syncSeqSeen = _apiWriteSeq; _syncDelay = SYNC_MIN; }   // scorer is active
+        changed = await refreshScoring(false);
+        if(changed && navigator.vibrate) navigator.vibrate(100);
+      } catch(e) { /* ignore sync errors */ }
+    }
+    _syncDelay = changed ? SYNC_MIN : Math.min(Math.round(_syncDelay * 1.5), SYNC_MAX);
+    if(_onScoringPage()) _syncTimer = setTimeout(tick, _syncDelay);
+  };
+  _syncTimer = setTimeout(tick, _syncDelay);
 }
 function stopAutoSync() {
-  if(_syncTimer) { clearInterval(_syncTimer); _syncTimer = null; }
+  if(_syncTimer) { clearTimeout(_syncTimer); _syncTimer = null; }
+}
+// What the scoring screen actually shows; if this is equal, a redraw would change nothing.
+function _scoreSig(o) {
+  try { return JSON.stringify([o.score, o.onStrike, o.nonStriker, o.bowler, o.thisOver, o.innings, o.target,
+    o.battingCard, o.bowlingCard, o.availableBatsmen, o.availableBowlers, o.battingTeam, o.bowlingTeam]); }
+  catch(e) { return String(Math.random()); }
 }
 
 async function renderScoring(matchId) {
@@ -3286,22 +3318,27 @@ async function renderScoring(matchId) {
   startAutoSync();
 }
 
-async function refreshScoring() {
-  if(!state.matchId || !_stillOn('scoring', state.matchId)) return;
+// force=true (default): explicit resync, always redraws. force=false: background poll — redraws only
+// when the server differs from the screen. Returns true if the state changed.
+async function refreshScoring(force = true) {
+  if(!state.matchId || !_stillOn('scoring', state.matchId)) return false;
   try {
     const seq = _apiWriteSeq, mid = state.matchId;
     const res = await apiCall('get_state', {match_id: mid});
     if(res.error) throw new Error(res.error);
     // a ball was scored while this poll was in flight -> its snapshot is older than the screen
-    if(seq !== _apiWriteSeq || state.pendingRequest || mid !== state.matchId || !_stillOn('scoring', mid)) return;
+    if(seq !== _apiWriteSeq || state.pendingRequest || mid !== state.matchId || !_stillOn('scoring', mid)) return false;
     const localBowler = state.bowler;
+    const same = _scoreSig(res) === _scoreSig(state);
+    if(!force && (same || _touchBusy())) return false;   // nothing new, or a tap is in progress: leave the screen alone
     Object.assign(state, res);
     if(!state.bowler && localBowler) state.bowler = localBowler;
     state.isFreeHit = false;
     const over = state.thisOver||[];
     if(over.length > 0 && over[over.length-1].extrasType === 'noball') state.isFreeHit = true;
     drawScoring();
-  } catch(e) { /* silent */ }
+    return !same;
+  } catch(e) { return false; }
 }
 
 function drawScoring() {
@@ -10419,15 +10456,24 @@ async function renderLiveView(matchId) {
   state.matchId = matchId;
   const app = document.getElementById('app');
   app.innerHTML = '<div class="flex items-center justify-center py-16" style="color:var(--text2)"><div class="text-center"><div class="text-3xl mb-3">⏳</div><div>Loading match…</div></div></div>';
-  async function refreshView() {
+  let _lvSig = null, _lvFullAt = 0, _lvBusy = false, _lvDone = false;
+  async function refreshView(force) {
+    if(_lvBusy || (!force && (document.hidden || _touchBusy()))) return;
+    _lvBusy = true;
     try {
+      // Cheap check first: has anything on the scoreboard moved? If not, skip the three heavy
+      // calls and the redraw (a full refresh still happens once a minute for toss/status changes).
+      const _st0 = await apiCall('get_state', {match_id: matchId}).catch(() => ({}));
+      const _sig = JSON.stringify([_st0.score, _st0.innings, _st0.onStrike && _st0.onStrike.name, _st0.onStrike && _st0.onStrike.runs,
+        _st0.bowler && _st0.bowler.name, (_st0.thisOver||[]).length, _st0.error || '']);
+      if(!force && _lvSig !== null && _sig === _lvSig && Date.now() - _lvFullAt < 60000) return;
       const listRes = await apiCall('list_matches');
       let _m = (listRes.matches || []).find(x => x.match_id === matchId);
       if (!_m) {
         app.innerHTML = '<div style="text-align:center;padding:60px 20px"><div style="font-size:40px;margin-bottom:12px">🏏</div><div style="color:var(--text2)">Match not found</div></div>';
         return;
       }
-      const stateRes = await apiCall('get_state', {match_id: matchId}).catch(() => ({}));
+      const stateRes = _st0;
       stateRes._scorecard = [];
       stateRes._timeline = [];
       // fetch scorecard + timeline in parallel then render
@@ -10437,6 +10483,9 @@ async function renderLiveView(matchId) {
       ]);
       stateRes._scorecard = scR.innings || [];
       stateRes._timeline = tlR.timeline || [];
+      if(!_stillOn('live', matchId)) return;
+      _lvSig = _sig; _lvFullAt = Date.now();
+      if(_m.status === 'completed') { _lvDone = true; stopLiveViewPolling(); }   // finished match: nothing more will change
       try {
         _drawLiveView(_m, stateRes);
       } catch(drawErr) {
@@ -10446,17 +10495,17 @@ async function renderLiveView(matchId) {
     } catch(e) {
       const _mid = matchId;
       app.innerHTML = `<div style="text-align:center;padding:60px 20px;color:#ef4444"><div style="font-size:32px;margin-bottom:12px">⚠️</div><div style="margin-bottom:8px">${e.message||'Network error'}</div><button onclick="renderLiveView('${_mid}')" style="margin-top:8px;padding:10px 24px;background:#d0021b;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer">Retry</button></div>`;
-    }
+    } finally { _lvBusy = false; }
   }
   // Reset live watch state for this match
   _lvStreamActive = false;
   if(_lvWatchPollTimer) { clearTimeout(_lvWatchPollTimer); _lvWatchPollTimer = null; }
 
-  await refreshView();
+  await refreshView(true);   // first paint always happens, even in a background tab
 
-  // Scorer needs 2s updates; viewers need only 5s — reduces n8n load 60%
-  const _pollRate = localStorage.getItem('cricket_access_' + matchId) === 'full' ? 2000 : 5000;
-  _liveViewPollId = setInterval(refreshView, _pollRate);
+  // One light check every 5 s (was 4 heavy calls every 2-5 s); paused while the screen is off.
+  window._lvRefresh = refreshView;
+  if(!_lvDone && _stillOn('live', matchId)) _liveViewPollId = setInterval(() => refreshView(false), 5000);
 
   // Persistent live-watch poll — runs once, keeps checking, survives DOM rebuilds
   (function _lvWatchLoop(mid) {
@@ -10468,7 +10517,7 @@ async function renderLiveView(matchId) {
       if(btn) btn.style.display = _lvStreamActive ? 'block' : 'none';
       if(connecting) connecting.style.display = _lvStreamActive ? 'none' : 'block';
       if(connecting && !_lvStreamActive) connecting.textContent = '\uD83D\uDCE1 No live stream yet';
-      _lvWatchPollTimer = setTimeout(() => _lvWatchLoop(mid), 6000);
+      _lvWatchPollTimer = setTimeout(() => _lvWatchLoop(mid), document.hidden ? 60000 : 15000);
     }).catch(() => {
       const connecting = document.getElementById('lv-watch-live-connecting');
       if(connecting) connecting.textContent = '\uD83D\uDCE1 Checking\u2026 (slow network)';
