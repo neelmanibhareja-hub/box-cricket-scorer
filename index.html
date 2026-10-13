@@ -363,6 +363,22 @@ async function apiCall(action, data = {}) {
   return _apiExec(action, data, isSilent, isWrite);
 }
 
+// Scorer keys. A match's key arrives when you create it or join it with the invite code, and stays on this phone.
+function _scorerKey(matchId) { try { return localStorage.getItem('cricket_key_' + matchId) || ''; } catch(e) { return ''; } }
+function _afterApi(action, data, res) {
+  try {
+    if ((action === 'create_match' || action === 'join_by_code') && res.match_id && res.scorer_key) {
+      localStorage.setItem('cricket_key_' + res.match_id, res.scorer_key);
+      if (res.invite_code) localStorage.setItem('cricket_code_' + res.match_id, res.invite_code);
+    }
+    if (res.code === 'not_scorer' && data.match_id) {          // this phone is not a scorer for that match
+      localStorage.removeItem('cricket_access_' + data.match_id);
+      showToast('Only the scorer can change this match');
+      if (getRoute().page === 'scoring' && getRoute().params[0] === data.match_id) setTimeout(() => navigate('live/' + data.match_id), 600);
+    }
+  } catch(e) {}
+}
+
 // For multi-step flows (score-only, super over, rematch): stop at the first failed step
 // instead of navigating on as if it had worked.
 async function apiCallOk(action, data) {
@@ -376,6 +392,12 @@ async function _apiExec(action, data, isSilent, isWrite) {
   if(!isSilent) showLoader();
   // One id per logical write, reused by every retry and by the offline queue.
   if (isWrite && !data.client_req_id) data = { ...data, client_req_id: _newReqId() };
+  if (action === 'create_match' && data.kv === undefined) data = { ...data, kv: 1 };   // this app keeps scorer keys
+  // The server only accepts scoring from a phone holding the match's key (see _scorerKey).
+  try {
+    if (data.match_id && data.key === undefined) { const k = _scorerKey(data.match_id); if (k) data = { ...data, key: k }; }
+    if (data.admin_pin === undefined) { const pin = localStorage.getItem('cricket_admin_pin'); if (pin && localStorage.getItem('cricket_admin') === 'true') data = { ...data, admin_pin: pin }; }
+  } catch(e) {}
   if (isWrite) _apiWriteSeq++;
   try {
     if (!navigator.onLine) {
@@ -404,7 +426,7 @@ async function _apiExec(action, data, isSilent, isWrite) {
         try { json = text ? JSON.parse(text) : null; } catch(e) { json = null; }
         if (json && json._retry) { lastErr = 'Server busy'; }                    // lost a write race — safe to resend
         else if (!res.ok && res.status >= 500) { lastErr = 'Server error ' + res.status; }
-        else if (json && typeof json === 'object') { if (isWrite) _apiWriteSeq++; return json; }
+        else if (json && typeof json === 'object') { if (isWrite) _apiWriteSeq++; _afterApi(action, data, json); return json; }
         else if (!res.ok) { return { error: 'Server error ' + res.status }; }
         else { lastErr = 'Empty response from server'; }
       } catch(e) {
@@ -703,6 +725,7 @@ function route() {
   _logVisit(page, params[0]||'');
 }
 window.addEventListener('hashchange', route);
+window.addEventListener('hashchange', () => { if(typeof _onboardingPending !== 'undefined' && _onboardingPending && getRoute().page === 'home') _checkOnboarding(); });
 document.addEventListener('visibilitychange', () => {
   if(document.hidden) return;
   const pg = getRoute().page;
@@ -1063,7 +1086,7 @@ async function renderHome() {
           </div>
           <div style="border-top:1px solid #f0f0f0;margin:0 12px"></div>
           <div class="flex items-center gap-2 px-3 py-2">
-            ${m.invite_code?`<button onclick="event.stopPropagation();shareOnWhatsApp('${m.team_a.replace(/'/g,"\\'")} vs ${m.team_b.replace(/'/g,"\\'")}","${m.invite_code}","${m.match_id}")"
+            ${true?`<button onclick="event.stopPropagation();shareOnWhatsApp('${m.team_a.replace(/'/g,"\\'")} vs ${m.team_b.replace(/'/g,"\\'")}','','${m.match_id}')"
               class="text-xs px-3 py-1.5 rounded-lg active:scale-95 font-bold text-white" style="background:#25D366;touch-action:manipulation">
               \u{1F4AC} Share
             </button>`:''}
@@ -1109,25 +1132,34 @@ function _adminTap() {
     _adminTapCount = 0;
     const isAdmin = localStorage.getItem('cricket_admin') === 'true';
     if(isAdmin) {
-      localStorage.removeItem('cricket_admin');
+      localStorage.removeItem('cricket_admin'); localStorage.removeItem('cricket_admin_pin');
       showToast('Admin mode OFF');
     } else {
       const pin = prompt('Enter admin PIN:');
-      if(pin === '0704') {
-        localStorage.setItem('cricket_admin', 'true');
-        showToast('Admin mode ON — you can delete matches');
-      } else {
-        showToast('Wrong PIN');
-      }
+      if(!pin) return;
+      apiCall('verify_admin', { admin_pin: pin }).then(r => {
+        if(r && r.status === 'ok') { localStorage.setItem('cricket_admin', 'true'); localStorage.setItem('cricket_admin_pin', pin); showToast('Admin mode ON — you can delete matches'); }
+        else showToast((r && r.error) || 'Wrong PIN');
+      }).catch(() => showToast('Could not check the PIN — try again'));
     }
     renderHome();
   }
 }
 
 function shareOnWhatsApp(matchLabel, inviteCode, matchId) {
-  const url = 'https://n8n.barandates.in/webhook/cricket';
-  const msg = `\u{1F3CF} *${matchLabel}* - Live Scoring!\n\nWatch live: ${url}#scoring/${matchId}\n\nOr enter code: *${inviteCode}*\n\n${url}`;
+  // For people watching: the live page only. (It used to send the scoring link and the scorer's code to everyone.)
+  const msg = `\u{1F3CF} *${matchLabel}* — live score\n\nWatch ball by ball: ${BC_APP_URL}#live/${matchId}`;
   window.open('https://wa.me/?text=' + encodeURIComponent(msg), '_blank');
+}
+// For a second scorer: the invite code. Only a phone that already scores the match can see it.
+async function shareScorerInvite(matchId) {
+  try {
+    let code = localStorage.getItem('cricket_code_' + matchId);
+    if(!code) { const m = await apiCall('get_match', { match_id: matchId }); code = m && m.invite_code; }
+    if(!code) { showToast('Only the scorer can invite a co-scorer'); return; }
+    const msg = `\u{1F3CF} Help me score this match.\nOpen ${BC_APP_URL} → Join → enter code *${code}*\n(Keep this code private: anyone with it can change the score.)`;
+    window.open('https://wa.me/?text=' + encodeURIComponent(msg), '_blank');
+  } catch(e) { showToast('Could not get the invite code'); }
 }
 
 // The app's public address (GitHub Pages). The old Netlify site still answers but is a stale copy - never share it.
@@ -3390,6 +3422,7 @@ function _drawScoringInner() {
       </div>
       <div id="score-more-menu" style="display:none;position:absolute;top:52px;right:12px;z-index:200;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:8px;box-shadow:0 4px 20px rgba(0,0,0,0.2);min-width:180px">
         <button onclick="showAddPlayerModal();document.getElementById('score-more-menu').style.display='none'" style="width:100%;padding:10px 12px;border:none;background:none;text-align:left;font-size:13px;font-weight:600;cursor:pointer;color:var(--text);border-radius:8px">➕ Add Player</button>
+        <button onclick="shareScorerInvite(state.matchId);document.getElementById('score-more-menu').style.display='none'" style="width:100%;padding:10px 12px;border:none;background:none;text-align:left;font-size:13px;font-weight:600;cursor:pointer;color:var(--text);border-radius:8px">🤝 Invite a co-scorer</button>
         <button onclick="showSetScoreModal();document.getElementById('score-more-menu').style.display='none'" style="width:100%;padding:10px 12px;border:none;background:none;text-align:left;font-size:13px;font-weight:600;cursor:pointer;color:var(--text);border-radius:8px">✏️ Set Score (mid-match)</button>
         <button onclick="showEditOversModal();document.getElementById('score-more-menu').style.display='none'" style="width:100%;padding:10px 12px;border:none;background:none;text-align:left;font-size:13px;font-weight:600;cursor:pointer;color:var(--text);border-radius:8px">🔢 Change Overs</button>
         ${state.recordingEnabled?`<button onclick="toggleAiScore();document.getElementById('score-more-menu').style.display='none'" style="width:100%;padding:10px 12px;border:none;background:none;text-align:left;font-size:13px;font-weight:600;cursor:pointer;color:var(--text);border-radius:8px">${state.aiScoreEnabled?'🤖 AI Score ON':'🤖 AI Score OFF'}</button>`:''}
@@ -5418,15 +5451,109 @@ function _getSupportedMimeType() {
   return '';
 }
 
+/* BC-TRIM: keep only the end of a recording, without re-encoding.
+   MediaRecorder writes fragmented MP4: [ftyp][moov] then one [moof][mdat] pair per ~second, each
+   starting on a keyframe. A highlight is everything since the previous ball (15-40 s) but the shot is
+   in the last few seconds, so we keep the header plus the last fragments and shift their clocks to 0.
+   skipEndSec drops the tail as well (a wicket is confirmed long after it falls).
+   Returns { buf, dur, trimmed } - on anything unexpected it returns the input untouched. */
+function bcTrimFmp4(input, keepSec, skipEndSec) {
+  const u8 = input instanceof Uint8Array ? input : new Uint8Array(input);
+  const fail = () => ({ buf: u8, dur: 0, trimmed: false });
+  try {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const type = p => String.fromCharCode(u8[p + 4], u8[p + 5], u8[p + 6], u8[p + 7]);
+    const boxes = (start, end) => { const out = []; let p = start;
+      while (p + 8 <= end) { let size = dv.getUint32(p), hdr = 8;
+        if (size === 1) { if (p + 16 > end) break; size = dv.getUint32(p + 8) * 4294967296 + dv.getUint32(p + 12); hdr = 16; } else if (size === 0) size = end - p;
+        if (size < hdr || p + size > end) break;
+        out.push({ t: type(p), s: p, e: p + size, b: p + hdr }); p += size; }
+      return out; };
+    const top = boxes(0, u8.length);
+    const moov = top.find(b => b.t === 'moov'); if (!moov || !top.some(b => b.t === 'ftyp')) return fail();
+    // track id -> { timescale, video? }
+    const tracks = {};
+    boxes(moov.b, moov.e).filter(b => b.t === 'trak').forEach(trak => {
+      const kids = boxes(trak.b, trak.e); const tkhd = kids.find(b => b.t === 'tkhd'); const mdia = kids.find(b => b.t === 'mdia'); if (!tkhd || !mdia) return;
+      const id = dv.getUint32(tkhd.b + (u8[tkhd.b] === 1 ? 20 : 12));
+      const mk = boxes(mdia.b, mdia.e); const mdhd = mk.find(b => b.t === 'mdhd'); const hdlr = mk.find(b => b.t === 'hdlr'); if (!mdhd) return;
+      const ts = dv.getUint32(mdhd.b + (u8[mdhd.b] === 1 ? 20 : 12));
+      tracks[id] = { ts, video: hdlr ? type(hdlr.b + 4) === 'vide' : false }; });
+    const vid = Object.keys(tracks).find(id => tracks[id].video); if (!vid) return fail();
+    // fragments = [moof][mdat] pairs, with each track's start time (tfdt) and duration (sum of trun)
+    const frags = [];
+    for (let i = 0; i < top.length; i++) {
+      if (top[i].t !== 'moof') continue; const mdat = top[i + 1]; if (!mdat || mdat.t !== 'mdat') return fail();
+      const f = { s: top[i].s, e: mdat.e, tfdt: [], t0: null, dur: 0 };
+      boxes(top[i].b, top[i].e).filter(b => b.t === 'traf').forEach(traf => {
+        const k = boxes(traf.b, traf.e); const tfhd = k.find(b => b.t === 'tfhd'); const tfdt = k.find(b => b.t === 'tfdt'); if (!tfhd || !tfdt) return;
+        const id = dv.getUint32(tfhd.b + 4); const v1 = u8[tfdt.b] === 1;
+        const base = v1 ? dv.getUint32(tfdt.b + 4) * 4294967296 + dv.getUint32(tfdt.b + 8) : dv.getUint32(tfdt.b + 4);
+        f.tfdt.push({ id, pos: tfdt.b + 4, v1, base });
+        if (String(id) === String(vid)) {
+          f.t0 = base / tracks[id].ts;
+          const flags = dv.getUint32(tfhd.b) & 0xffffff; let p = tfhd.b + 8; if (flags & 1) p += 8; if (flags & 2) p += 4; const defDur = (flags & 8) ? dv.getUint32(p) : 0;
+          k.filter(b => b.t === 'trun').forEach(tr => { const fl = dv.getUint32(tr.b) & 0xffffff; const n = dv.getUint32(tr.b + 4); let q = tr.b + 8; if (fl & 1) q += 4; if (fl & 4) q += 4;
+            const step = ((fl & 0x100) ? 4 : 0) + ((fl & 0x200) ? 4 : 0) + ((fl & 0x400) ? 4 : 0) + ((fl & 0x800) ? 4 : 0);
+            if (fl & 0x100) { for (let x = 0; x < n; x++) f.dur += dv.getUint32(q + x * step); } else f.dur += n * defDur; });
+          f.dur /= tracks[id].ts; } });
+      if (f.t0 === null) return fail(); frags.push(f); }
+    if (!frags.length) return fail();
+    const realLast = frags[frags.length - 1]; const realEnd = realLast.t0 + realLast.dur; const total = realEnd - frags[0].t0;
+    let li = frags.length - 1; if (skipEndSec > 0) while (li > 0 && frags[li].t0 >= realEnd - skipEndSec) li--;
+    const last = frags[li]; const end = last.t0 + last.dur;
+    if (!(total > 0) || (li === frags.length - 1 && total <= keepSec + 1.5)) return { buf: u8, dur: Math.round(total * 10) / 10, trimmed: false };   // already short
+    let first = li; while (first > 0 && end - frags[first].t0 < keepSec) first--;
+    const cut = frags[first].t0;                                // seconds removed from the front
+    const head = top.filter(b => b.s < frags[0].s);              // ftyp, moov (and anything else before the media)
+    const headLen = head.reduce((n, b) => n + (b.e - b.s), 0); const bodyLen = last.e - frags[first].s;
+    const out = new Uint8Array(headLen + bodyLen); let o = 0;
+    head.forEach(b => { out.set(u8.subarray(b.s, b.e), o); o += b.e - b.s; });
+    out.set(u8.subarray(frags[first].s, last.e), o);
+    const odv = new DataView(out.buffer); const shift = o - frags[first].s;
+    for (let i = first; i <= li; i++) frags[i].tfdt.forEach(t => {
+      const tr = tracks[t.id]; if (!tr) return; const nb = Math.max(0, Math.round(t.base - cut * tr.ts)); const p = t.pos + shift;
+      if (t.v1) { odv.setUint32(p, Math.floor(nb / 4294967296)); odv.setUint32(p + 4, nb >>> 0); } else odv.setUint32(p, nb >>> 0); });
+    return { buf: out, dur: Math.round((end - cut) * 10) / 10, trimmed: true };
+  } catch (e) { return fail(); }
+}
+
+/* The recorder copies its picture from a <video>. It used to read the on-screen preview, but iOS Safari
+   pauses a muted autoplay video as soon as it scrolls out of view - scroll down to the run buttons and
+   every frame after that was the same frozen image. This source is started by the user's tap, never
+   leaves the viewport (2 px, invisible), and a watchdog restarts it if it ever stalls. */
+function _recSource() {
+  let v = document.getElementById('rec-source');
+  if(!v) {
+    v = document.createElement('video'); v.id = 'rec-source'; v.muted = true; v.playsInline = true;
+    v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', ''); v.setAttribute('muted', '');
+    v.style.cssText = 'position:fixed;left:0;bottom:0;width:2px;height:2px;opacity:0.01;pointer-events:none;z-index:1';
+    document.body.appendChild(v);
+  }
+  if(v.srcObject !== _cameraStream) v.srcObject = _cameraStream;
+  try { const p = v.play(); if(p && p.catch) p.catch(() => {}); } catch(e) {}
+  return v;
+}
+let _recLastT = -1, _recStuck = 0;
+function _recWatchdog(v) {
+  if(!v || !_cameraStream || document.hidden) return;
+  if(v.paused || v.ended) { try { const p = v.play(); if(p && p.catch) p.catch(() => {}); } catch(e) {} }
+  const t = v.currentTime;
+  if(t === _recLastT) { if(++_recStuck >= 2) { _recStuck = 0; window._recStalls = (window._recStalls || 0) + 1; try { v.srcObject = null; v.srcObject = _cameraStream; const p = v.play(); if(p && p.catch) p.catch(() => {}); } catch(e) {} } }
+  else _recStuck = 0;
+  _recLastT = t;
+}
+
 function startRecording() {
   if(!_cameraStream || _mediaRecorder || window._startRecordingInFlight) return;
   window._startRecordingInFlight = true;
   if(typeof MediaRecorder === 'undefined') { showToast('Recording not supported on this browser'); return; }
   if(window._cancelCanvasDraw) { window._cancelCanvasDraw(); window._cancelCanvasDraw = null; }
   _canvasInterval = null;
-  const vid = document.getElementById('camera-preview');
   const canvas = document.getElementById('camera-canvas');
-  if(!vid || !canvas) return;
+  if(!canvas) { window._startRecordingInFlight = false; return; }
+  const vid = _recSource();
+  window._recStartedAt = Date.now();
 
   const vTrack = _cameraStream.getVideoTracks()[0];
   const settings = vTrack ? vTrack.getSettings() : {};
@@ -5446,6 +5573,7 @@ function startRecording() {
   // Fallback interval: keeps score bar updated even when document is hidden
   // (rAF is throttled/paused by browser when tab is backgrounded)
   let _scoreInterval = setInterval(() => {
+    _recWatchdog(vid);
     if(document.hidden && vid.readyState >= 2) {
       ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
       drawScoreBarOnCanvas(ctx, canvas.width, canvas.height);
@@ -5515,7 +5643,7 @@ function saveClip(isHighlight, highlightMeta) {
           ballNum: _clipCount, mimeType, ext
         });
         updateRecentClipsUI();
-        if(_isHL && state.matchId) _uploadHighlightClip(blob, ext, _hlMeta, state.matchId);
+        if(_isHL && state.matchId) _trimAndUploadHighlight(blob, ext, _hlMeta, state.matchId);
       }
     } catch(e) {
       _recordedChunks = [];
@@ -5524,6 +5652,24 @@ function saveClip(isHighlight, highlightMeta) {
   };
   if(recorder.state === 'recording') recorder.stop();
   else { _recordedChunks = []; if(state.recordingEnabled && _cameraStream) startRecording(); }
+}
+
+// A highlight is everything recorded since the previous ball. Keep the moment itself:
+// 4s and 6s are tapped right after the shot (last ~11 s); a wicket is confirmed after the dismissal
+// details are entered, so its window ends when WICKET was tapped (+2 s).
+async function _trimAndUploadHighlight(blob, ext, meta, matchId) {
+  let out = blob; meta = Object.assign({}, meta);
+  try {
+    if(ext === 'mp4') {
+      let skipEnd = 0;
+      if(meta.type === 'wicket' && window._wktTapAt) skipEnd = Math.max(0, (Date.now() - window._wktTapAt) / 1000 - 2);
+      const r = bcTrimFmp4(await blob.arrayBuffer(), 11, Math.min(skipEnd, 60));
+      if(r.dur) meta.dur = r.dur;
+      if(r.trimmed) out = new Blob([r.buf], { type: blob.type || 'video/mp4' });
+    }
+  } catch(e) { out = blob; }
+  if(!meta.dur && window._recStartedAt) meta.dur = 0;
+  return _uploadHighlightClip(out, ext, meta, matchId);
 }
 
 async function _uploadHighlightClip(blob, ext, meta, matchId) {
@@ -5549,14 +5695,14 @@ async function _uploadHighlightClip(blob, ext, meta, matchId) {
     const inn = state.innings || 1;
     const path = `highlights/${matchId}/${ts}_inn${inn}_${type}.${ext}`;
     const ref = _fbStorage.ref(path);
-    const snap = await ref.put(blob);
+    const snap = await ref.put(blob, { contentType: blob.type || 'video/mp4', cacheControl: 'public, max-age=31536000, immutable' });   // clips never change: let phones keep them
     const url = await snap.ref.getDownloadURL();
     const s = state.score || {runs:0,wickets:0,balls:0};
     const overLabel = Math.floor(s.balls/6)+'.'+s.balls%6;
     showToast('\ud83c\udfac Highlight clip saved!');
     await apiCall('save_highlight', {
       match_id: matchId,
-      url, type, ext,
+      url, type, ext, dur: meta.dur || 0,
       runs: meta.runs || 0,
       batsman: meta.batsman || '',
       bowler: meta.bowler || '',
@@ -5914,6 +6060,7 @@ function stopCamera() {
   }
   const vid = document.getElementById('camera-preview');
   if(vid) vid.srcObject = null;
+  const rs = document.getElementById('rec-source'); if(rs) { try { rs.pause(); } catch(e) {} rs.srcObject = null; rs.remove(); }
   document.getElementById('camera-container').style.display = 'none';
 }
 
@@ -6815,6 +6962,7 @@ async function scoreExtra(type, extraRuns) {
 let wktData = {};
 function showWicketModal() {
   if(state.pendingRequest) return;
+  window._wktTapAt = Date.now();     // the wicket fell just before this tap; the highlight is cut around it
   wktData = {};
   document.getElementById('wicket-who').classList.add('hidden');
   document.getElementById('wicket-fielder').classList.add('hidden');
@@ -7874,7 +8022,7 @@ async function showHighlightsReel(matchId, filter) {
 
       <!-- Swipe hint (center, brief) -->
       <div id="hl-swipe-hint" style="position:absolute;bottom:50%;left:0;right:0;display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:none;opacity:0;transition:opacity 0.4s">
-        <div style="color:rgba(255,255,255,0.4);font-size:12px;font-weight:600">↕ Swipe for next / prev</div>
+        <div style="color:rgba(255,255,255,0.75);font-size:13px;font-weight:600;background:rgba(0,0,0,0.45);padding:6px 12px;border-radius:14px">Tap the sides to skip · swipe for next</div>
       </div>
 
       <!-- Bottom gradient + controls -->
@@ -7924,6 +8072,9 @@ async function showHighlightsReel(matchId, filter) {
       } catch(e2) {}
     }
 
+    // Older clips are 15-40 s of waiting with the shot at the end; where a shortened copy exists, use it for
+    // everything (playing, preloading, downloading, sharing).
+    clips = clips.map(c => c && c.url_s ? Object.assign({}, c, { url_full: c.url, url: c.url_s }) : c);
     if(filter && clips.length) {
       clips = clips.filter(c =>
         (!filter.type || c.type === filter.type) &&
@@ -7983,7 +8134,8 @@ function _hlShowControls(autoHide) {
   const seg  = document.getElementById('hl-segments');
   if(!ctrl) return;
   ctrl.style.opacity = '1';
-  ctrl.style.pointerEvents = 'auto';
+  ctrl.style.pointerEvents = 'none';       // full-screen layer: taps fall through to the video; its bars opt back in
+  ctrl.style.visibility = 'visible';
   if(seg) seg.style.opacity = '1';
   _hlControlsVisible = true;
   if(_hlControlsTimer) clearTimeout(_hlControlsTimer);
@@ -7993,7 +8145,7 @@ function _hlShowControls(autoHide) {
       if(vid && !vid.paused) {
         const ctrl2 = document.getElementById('hl-controls');
         const seg2  = document.getElementById('hl-segments');
-        if(ctrl2) { ctrl2.style.opacity = '0'; ctrl2.style.pointerEvents = 'none'; }
+        if(ctrl2) { ctrl2.style.opacity = '0'; ctrl2.style.pointerEvents = 'none'; ctrl2.style.visibility = 'hidden'; }
         if(seg2)  seg2.style.opacity = '0';
         _hlControlsVisible = false;
       }
@@ -8007,7 +8159,7 @@ function hlToggleControls() {
   if(!ctrl) return;
   if(_hlControlsVisible) {
     if(_hlControlsTimer) clearTimeout(_hlControlsTimer);
-    ctrl.style.opacity = '0'; ctrl.style.pointerEvents = 'none';
+    ctrl.style.opacity = '0'; ctrl.style.pointerEvents = 'none'; ctrl.style.visibility = 'hidden';
     if(seg) seg.style.opacity = '0';
     _hlControlsVisible = false;
   } else {
@@ -8029,13 +8181,19 @@ function _hlWireGestures(zone) {
     const dy = ty0 - e.changedTouches[0].clientY;
     const dx = tx0 - e.changedTouches[0].clientX;
     const dt = Date.now() - tt0;
+    const sideTap = x => { const w = window.innerWidth || 1; if(x < w * 0.3) { hlNav(-1); return true; } if(x > w * 0.7) { hlNav(1); return true; } return false; };
+    zone._touched = Date.now();
     if(Math.abs(dy) > 50 && Math.abs(dy) > Math.abs(dx) * 1.5 && dt < 500) {
       if(dy > 0) hlNav(1); else hlNav(-1);
+    } else if(Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5 && dt < 500) {
+      if(dx > 0) hlNav(1); else hlNav(-1);
     } else if(!moved && dt < 300) {
-      hlToggleControls();
+      if(!sideTap(e.changedTouches[0].clientX)) hlToggleControls();
     }
   }, {passive: true});
-  zone.addEventListener('click', () => { if(!moved) hlToggleControls(); });
+  zone.addEventListener('click', e => {                       // mouse / desktop; touch already handled above
+    if(zone._touched && Date.now() - zone._touched < 700) return;
+    const w = window.innerWidth || 1; if(e.clientX < w * 0.3) hlNav(-1); else if(e.clientX > w * 0.7) hlNav(1); else hlToggleControls(); });
 }
 
 function hlUpdateSegments(activeIdx) {
@@ -8110,7 +8268,8 @@ function hlPlay(idx) {
   vid.ontimeupdate = () => {
     if(window._hlIdx !== idx) return;
     const fill = document.getElementById('hl-seg-fill');
-    if(fill && vid.duration > 0) fill.style.width = (vid.currentTime / vid.duration * 100) + '%';
+    const D = (isFinite(vid.duration) && vid.duration > 0) ? vid.duration : (c.dur || 0);
+    if(fill && D > 0) fill.style.width = Math.min(100, vid.currentTime / D * 100) + '%';
   };
 
   vid.onloadedmetadata = () => {
@@ -8121,7 +8280,9 @@ function hlPlay(idx) {
     vid.style.visibility = 'visible';
     vid.style.opacity = '1';
     vid.playbackRate = window._hlSpeed || 1;
-    vid.play().catch(() => {
+    let wantSound = false; try { wantSound = localStorage.getItem('hl_sound') === '1'; } catch(e) {}
+    vid.muted = !wantSound; const mb = document.getElementById('hl-mute-btn'); if(mb) mb.textContent = vid.muted ? '🔇' : '🔊';
+    vid.play().catch(() => { vid.muted = true; if(mb) mb.textContent = '🔇'; return vid.play(); }).catch(() => {
       if(loading) { loading.style.display = 'flex'; loading.innerHTML = '<button onclick="document.getElementById(\'hl-video\').play();document.getElementById(\'hl-loading\').style.display=\'none\'" style="background:rgba(255,255,255,0.15);border:none;color:#fff;padding:14px 24px;border-radius:12px;font-size:16px;font-weight:700;cursor:pointer;touch-action:manipulation">\u25B6 Tap to Play</button>'; }
     });
     _hlFlashType(c.type);
@@ -8261,6 +8422,7 @@ function hlToggleMute() {
   const btn = document.getElementById('hl-mute-btn');
   if(!vid) return;
   vid.muted = !vid.muted;
+  try { localStorage.setItem('hl_sound', vid.muted ? '0' : '1'); } catch(e) {}
   if(btn) btn.textContent = vid.muted ? '🔇' : '🔊';
 }
 
@@ -8994,7 +9156,7 @@ function shareScorecard() {
   });
 
   text += '📲 Scored live on Box Cricket\n';
-  if(matchInfo.invite_code) text += '🔑 Match code: *' + matchInfo.invite_code + '*\n';
+  // (the scorer's code is no longer added to shared scorecards)
 
   const url = 'https://wa.me/?text=' + encodeURIComponent(text);
   window.open(url, '_blank');
@@ -10396,426 +10558,359 @@ async function doJoinMatch() {
 }
 
 
-/* ── LIVE VIEW (spectator) ─────────────────────────────── */
-let _liveViewPollId = null;
-let _liveViewTab = 'live';
-let _liveViewScInn = 1;
+/* ── LIVE VIEW (spectator) ───────────────────────────────
+   What people at home see. Layout follows the familiar live-scorecard pattern: a sticky score
+   block with one status line, Live (batters, bowler, key stats, ball-by-ball), Scorecard, Overs.
+   Rules this page keeps:
+   - one request (get_live_view) carries everything; a poll that finds nothing new costs one tiny reply
+   - the page is built once; an update only touches the parts whose content changed, so the tab,
+     the scroll position and whatever is under the reader's finger stay put
+   - nothing ever covers the score: no onboarding, no notification sheet                      */
+let _liveViewPollId = null;          // non-null while a live view is polling (route() and the stream poll read it)
 let _lvStreamActive = false;
 let _lvWatchPollTimer = null;
+const LV = { mid: null, data: null, rev: null, tab: 'live', open: {}, timer: null, busy: false, fails: 0, html: {}, seen: null, token: 0, built: false };
+
+const LV_CSS = `
+#lv-root{flex:none;min-height:100dvh;background:var(--bg);color:var(--text);padding-bottom:calc(24px + env(safe-area-inset-bottom,0px))}
+#lv-top{position:sticky;top:0;z-index:20;background:#141a2e;color:#fff;box-shadow:0 1px 0 rgba(255,255,255,.06)}
+.lv-head{display:flex;align-items:center;gap:10px;padding:10px 12px 4px}
+.lv-back{background:none;border:0;color:rgba(255,255,255,.8);font-size:22px;line-height:1;min-width:40px;min-height:40px;padding:6px 8px 6px 2px;cursor:pointer;touch-action:manipulation}
+.lv-title{flex:1;min-width:0;font-size:13px;font-weight:700;color:rgba(255,255,255,.82);line-height:1.25;overflow-wrap:anywhere}
+.lv-title small{display:block;font-size:10.5px;font-weight:600;color:rgba(255,255,255,.6);letter-spacing:.3px}
+.lv-badge{display:flex;align-items:center;gap:5px;font-size:11px;font-weight:800;white-space:nowrap}
+.lv-badge.live{color:#ff6b6b}.lv-badge.done{color:rgba(255,255,255,.65)}.lv-badge.soon{color:#fbbf24}
+.lv-dot{width:7px;height:7px;border-radius:50%;background:#ff4d4d;animation:cb-pulse 1.4s infinite}
+.lv-share{background:rgba(37,211,102,.16);border:1px solid rgba(37,211,102,.4);color:#4ade80;font-size:12px;font-weight:700;min-height:40px;padding:7px 13px;border-radius:20px;cursor:pointer;touch-action:manipulation;white-space:nowrap}
+.lv-score{padding:2px 14px 10px}
+.lv-team{display:flex;align-items:baseline;gap:8px;padding:2px 0}
+.lv-team .nm{flex:1;min-width:0;font-size:14px;font-weight:600;color:rgba(255,255,255,.66);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lv-team .sc{font-size:17px;font-weight:700;color:rgba(255,255,255,.72);font-variant-numeric:tabular-nums}
+.lv-team .ov{font-size:12px;color:rgba(255,255,255,.6);min-width:52px;text-align:right;font-variant-numeric:tabular-nums}
+.lv-team.on .nm{color:#fff;font-weight:800}.lv-team.on .sc{color:#fff;font-size:26px;font-weight:900}
+.lv-status{margin-top:5px;font-size:13.5px;font-weight:700;color:#ffb4b4;line-height:1.3}
+.lv-status.done{color:#86efac}.lv-status.calm{color:rgba(255,255,255,.78);font-weight:600}
+.lv-meta{margin-top:3px;font-size:12px;color:rgba(255,255,255,.66);font-variant-numeric:tabular-nums}
+.lv-meta b{color:#fff;font-weight:700}
+.lv-review{margin-top:8px;border-radius:8px;padding:8px 10px;font-size:13px;font-weight:800;text-align:center;letter-spacing:.3px}
+.lv-review.wait{background:#78350f;color:#fde68a}.lv-review.out{background:#991b1b;color:#fff}.lv-review.notout{background:#14532d;color:#fff}
+.lv-tabs{display:flex;border-top:1px solid rgba(255,255,255,.08)}
+.lv-tabs button{flex:1;background:none;border:0;border-bottom:3px solid transparent;color:rgba(255,255,255,.66);font-size:13px;font-weight:600;padding:11px 4px 9px;cursor:pointer;touch-action:manipulation;white-space:nowrap}
+.lv-tabs button.on{color:#fff;font-weight:800;border-bottom-color:#ef4444}
+.lv-net{display:none;background:#78350f;color:#fde68a;font-size:12px;font-weight:700;text-align:center;padding:5px}
+.lv-pane{display:none;padding:10px 10px 0}.lv-pane.on{display:block}
+.lv-card{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:10px}
+.lv-tbl{width:100%;border-collapse:collapse;font-size:13.5px;font-variant-numeric:tabular-nums}
+.lv-tbl th{font-size:11px;font-weight:700;color:var(--text2);text-align:right;padding:8px 6px;border-bottom:1px solid var(--border)}
+.lv-tbl th:first-child,.lv-tbl td:first-child{text-align:left;padding-left:12px}
+.lv-tbl th:last-child,.lv-tbl td:last-child{padding-right:12px}
+.lv-tbl td{padding:9px 6px;text-align:right;border-bottom:1px solid var(--border);color:var(--text2)}
+.lv-tbl tr:last-child td{border-bottom:0}
+.lv-tbl td.nm{color:var(--text);font-weight:600;overflow-wrap:anywhere}
+.lv-tbl td.nm small{display:block;font-size:11.5px;font-weight:400;color:var(--text2);margin-top:1px}
+.lv-tbl td.big{color:var(--text);font-weight:800;font-size:14.5px}
+.lv-tbl tr.cur td.nm{font-weight:800}
+.lv-tbl td.w{color:#dc2626;font-weight:800}
+.lv-kv{display:flex;gap:10px;padding:9px 12px;border-bottom:1px solid var(--border);font-size:13px;align-items:center}
+.lv-kv:last-child{border-bottom:0}.lv-kv .k{color:var(--text2);min-width:86px;flex-shrink:0}.lv-kv .v{color:var(--text);font-weight:600;min-width:0;overflow-wrap:anywhere}
+.lv-chips{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.lv-chip{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;padding:0 5px;border-radius:13px;font-size:11.5px;font-weight:800;color:#fff;background:#64748b;font-variant-numeric:tabular-nums}
+.lv-chip.k0{background:#94a3b8}.lv-chip.kr{background:#15803d}.lv-chip.k4{background:#1d4ed8}.lv-chip.k6{background:#6d28d9}.lv-chip.kw{background:#dc2626}.lv-chip.kx{background:#b45309}
+.lv-sep{width:1px;height:18px;background:var(--border);margin:0 2px}
+.lv-empty{text-align:center;color:var(--text2);padding:28px 12px;font-size:14px}
+.lv-btn{display:block;width:100%;padding:13px;border-radius:10px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:14px;font-weight:700;cursor:pointer;touch-action:manipulation;margin-bottom:10px}
+.lv-btn.pri{background:#d0021b;border-color:#d0021b;color:#fff}.lv-btn.quiet{font-weight:600;color:var(--text2);font-size:13px;padding:10px}
+.lv-ovbar{display:flex;align-items:center;gap:10px;background:var(--bg);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:8px 12px;font-size:12.5px;color:var(--text2)}
+.lv-ovbar b{color:var(--text)}.lv-ovbar .r{margin-left:auto;font-weight:800;color:var(--text);white-space:nowrap}
+.lv-ball{display:flex;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border);align-items:flex-start}
+.lv-ball .n{width:30px;flex-shrink:0;font-size:12.5px;font-weight:700;color:var(--text2);padding-top:4px;font-variant-numeric:tabular-nums}
+.lv-ball .t{flex:1;min-width:0;font-size:13.5px;line-height:1.4;color:var(--text);padding-top:3px;overflow-wrap:anywhere}
+.lv-ball.kw{background:rgba(220,38,38,.07)}.lv-ball.k6{background:rgba(109,40,217,.06)}.lv-ball.k4{background:rgba(29,78,216,.05)}
+.lv-ball.new{animation:lvNew 1.6s ease-out}
+@keyframes lvNew{0%{background:rgba(250,204,21,.38)}100%{background:transparent}}
+.lv-tick{animation:lvTick .5s ease-out}
+@keyframes lvTick{0%{transform:scale(1.14);color:#fde047}100%{transform:scale(1)}}
+.lv-inn{display:flex;align-items:center;gap:8px;width:100%;background:#1f5d45;color:#fff;border:0;padding:11px 12px;font-size:14px;font-weight:800;cursor:pointer;touch-action:manipulation;text-align:left}
+.lv-inn .s{margin-left:auto;font-variant-numeric:tabular-nums}.lv-inn .s small{font-weight:500;opacity:.8;font-size:12px}
+.lv-inn .a{font-size:11px;opacity:.8;width:12px}
+.lv-note{padding:9px 12px;font-size:12.5px;line-height:1.5;color:var(--text2);border-top:1px solid var(--border)}
+.lv-note b{color:var(--text);font-weight:700}
+.lv-row2{display:flex;justify-content:space-between;gap:10px;padding:9px 12px;font-size:13px;border-top:1px solid var(--border)}
+.lv-row2.tot{font-weight:800;color:var(--text);background:var(--bg)}
+.lv-sk{background:linear-gradient(90deg,var(--border) 25%,var(--bg-card) 37%,var(--border) 63%);background-size:400% 100%;animation:lvSk 1.3s ease infinite;border-radius:8px}
+@keyframes lvSk{0%{background-position:100% 50%}100%{background-position:0 50%}}
+@media (prefers-reduced-motion:reduce){.lv-ball.new,.lv-tick,.lv-sk,.lv-dot{animation:none}}
+`;
 
 function stopLiveViewPolling() {
-  if(_liveViewPollId) { clearInterval(_liveViewPollId); _liveViewPollId = null; }
+  LV.token++;
+  if(LV.timer) { clearTimeout(LV.timer); LV.timer = null; }
   if(_lvWatchPollTimer) { clearTimeout(_lvWatchPollTimer); _lvWatchPollTimer = null; }
-  _lvStreamActive = false;
+  _liveViewPollId = null; _lvStreamActive = false; window._lvRefresh = null;
 }
 
-function _lvScTab(n) {
-  _liveViewScInn = n;
-  document.getElementById('lv-sc-inn1').style.display = n===1?'block':'none';
-  const inn2 = document.getElementById('lv-sc-inn2');
-  if(inn2) inn2.style.display = n===2?'block':'none';
-  const b1 = document.getElementById('lv-sc-btn1');
-  const b2 = document.getElementById('lv-sc-btn2');
-  const activeStyle = 'padding:7px 14px;border-radius:20px;border:none;background:#2d6a4f;color:#fff;font-size:12px;font-weight:700;cursor:pointer;touch-action:manipulation';
-  const inactiveStyle = 'padding:7px 14px;border-radius:20px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;touch-action:manipulation';
-  if(b1) b1.style.cssText = n===1 ? activeStyle : inactiveStyle;
-  if(b2) b2.style.cssText = n===2 ? activeStyle : inactiveStyle;
-}
 function _lvTab(tab) {
-  _liveViewTab = tab;
-  // Auto-load AI panel when switching to betting tab
-  if(tab === 'bet') {
-    const matchId = (window.route || {}).id;
-    if(matchId) {
-      if(!_loadAICacheIfFresh(matchId)) {
-        // Load cached from n8n if available, don't auto-trigger (user can click Analyse)
-        apiCall('get_ai_odds', {match_id: matchId}).then(res => {
-          if(res.ai && res.ai_fresh) _renderAIPanel(res.ai, matchId);
-        }).catch(()=>{});
-      }
-    }
-  }
-  ['lv-tab-live','lv-tab-scorecard','lv-tab-commentary','lv-tab-bet'].forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    const active = id === 'lv-tab-' + tab;
-    el.style.borderBottom = active ? '2px solid #d0021b' : '2px solid transparent';
-    el.style.color = active ? '#d0021b' : 'var(--text2)';
-    el.style.fontWeight = active ? '700' : '500';
-  });
-  ['lv-pane-live','lv-pane-scorecard','lv-pane-commentary','lv-pane-bet'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.style.display = id === 'lv-pane-' + tab ? 'block' : 'none';
-  });
+  LV.tab = tab;
+  document.querySelectorAll('#lv-tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  document.querySelectorAll('.lv-pane').forEach(p => p.classList.toggle('on', p.id === 'lv-pane-' + tab));
 }
+function _lvToggleInn(n) { LV.open[n] = !_lvInnOpen(n); _lvPaintScorecard(); }
+function _lvInnOpen(n) { return LV.open[n] !== undefined ? LV.open[n] : true; }
+
+// One quick attempt per poll (apiCall retries 3 x 12 s, far too patient for a 3 s poll).
+async function _lvCall(body, ms) {
+  const ac = new AbortController(); const to = setTimeout(() => ac.abort(), ms || 9000);
+  try {
+    const res = await fetch(WEBHOOK_URL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body), signal: ac.signal });
+    const j = await res.json(); if(!j || typeof j !== 'object') throw new Error('Bad reply'); return j;
+  } finally { clearTimeout(to); }
+}
+function _lvCacheGet(mid) { try { return JSON.parse(sessionStorage.getItem('lv_' + mid) || 'null'); } catch(e) { return null; } }
+function _lvCachePut(mid, d) { try { sessionStorage.setItem('lv_' + mid, JSON.stringify(d)); } catch(e) {} }
 
 async function renderLiveView(matchId) {
   stopLiveViewPolling();
-  _liveViewTab = 'live';
-  _liveViewScInn = 1;
+  const token = LV.token;
+  Object.assign(LV, { mid: matchId, data: null, rev: null, tab: 'live', open: {}, busy: false, fails: 0, html: {}, seen: null, built: false });
   state.matchId = matchId;
-  const app = document.getElementById('app');
-  app.innerHTML = '<div class="flex items-center justify-center py-16" style="color:var(--text2)"><div class="text-center"><div class="text-3xl mb-3">⏳</div><div>Loading match…</div></div></div>';
-  let _lvSig = null, _lvFullAt = 0, _lvBusy = false, _lvDone = false;
-  async function refreshView(force) {
-    if(_lvBusy || (!force && (document.hidden || _touchBusy()))) return;
-    _lvBusy = true;
-    try {
-      // Cheap check first: has anything on the scoreboard moved? If not, skip the three heavy
-      // calls and the redraw (a full refresh still happens once a minute for toss/status changes).
-      const _st0 = await apiCall('get_state', {match_id: matchId}).catch(() => ({}));
-      const _sig = JSON.stringify([_st0.score, _st0.innings, _st0.onStrike && _st0.onStrike.name, _st0.onStrike && _st0.onStrike.runs,
-        _st0.bowler && _st0.bowler.name, (_st0.thisOver||[]).length, _st0.error || '']);
-      if(!force && _lvSig !== null && _sig === _lvSig && Date.now() - _lvFullAt < 60000) return;
-      const listRes = await apiCall('list_matches');
-      let _m = (listRes.matches || []).find(x => x.match_id === matchId);
-      if (!_m) {
-        app.innerHTML = '<div style="text-align:center;padding:60px 20px"><div style="font-size:40px;margin-bottom:12px">🏏</div><div style="color:var(--text2)">Match not found</div></div>';
-        return;
-      }
-      const stateRes = _st0;
-      stateRes._scorecard = [];
-      stateRes._timeline = [];
-      // fetch scorecard + timeline in parallel then render
-      const [scR, tlR] = await Promise.all([
-        apiCall('get_scorecard', {match_id: matchId}).catch(()=>({})),
-        apiCall('get_timeline', {match_id: matchId}).catch(()=>({}))
-      ]);
-      stateRes._scorecard = scR.innings || [];
-      stateRes._timeline = tlR.timeline || [];
-      if(!_stillOn('live', matchId)) return;
-      _lvSig = _sig; _lvFullAt = Date.now();
-      if(_m.status === 'completed') { _lvDone = true; stopLiveViewPolling(); }   // finished match: nothing more will change
-      try {
-        _drawLiveView(_m, stateRes);
-      } catch(drawErr) {
-        app.innerHTML = '<div style="text-align:center;padding:60px 20px;color:#ef4444"><div style="font-size:28px;margin-bottom:8px">⚠️</div><div>Render error: ' + (drawErr.message||'unknown') + '</div></div>';
-        return;
-      }
-    } catch(e) {
-      const _mid = matchId;
-      app.innerHTML = `<div style="text-align:center;padding:60px 20px;color:#ef4444"><div style="font-size:32px;margin-bottom:12px">⚠️</div><div style="margin-bottom:8px">${e.message||'Network error'}</div><button onclick="renderLiveView('${_mid}')" style="margin-top:8px;padding:10px 24px;background:#d0021b;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer">Retry</button></div>`;
-    } finally { _lvBusy = false; }
-  }
-  // Reset live watch state for this match
-  _lvStreamActive = false;
-  if(_lvWatchPollTimer) { clearTimeout(_lvWatchPollTimer); _lvWatchPollTimer = null; }
-
-  await refreshView(true);   // first paint always happens, even in a background tab
-
-  // One light check every 5 s (was 4 heavy calls every 2-5 s); paused while the screen is off.
-  window._lvRefresh = refreshView;
-  if(!_lvDone && _stillOn('live', matchId)) _liveViewPollId = setInterval(() => refreshView(false), 5000);
-
-  // Persistent live-watch poll — runs once, keeps checking, survives DOM rebuilds
-  (function _lvWatchLoop(mid) {
-    if(_liveViewPollId === null) return; // view was navigated away
-    apiCall('get_live', {match_id: mid}).then(data => {
-      _lvStreamActive = !!(data && data.active);
-      const btn = document.getElementById('lv-watch-live-btn');
-      const connecting = document.getElementById('lv-watch-live-connecting');
-      if(btn) btn.style.display = _lvStreamActive ? 'block' : 'none';
-      if(connecting) connecting.style.display = _lvStreamActive ? 'none' : 'block';
-      if(connecting && !_lvStreamActive) connecting.textContent = '\uD83D\uDCE1 No live stream yet';
-      _lvWatchPollTimer = setTimeout(() => _lvWatchLoop(mid), document.hidden ? 60000 : 15000);
-    }).catch(() => {
-      const connecting = document.getElementById('lv-watch-live-connecting');
-      if(connecting) connecting.textContent = '\uD83D\uDCE1 Checking\u2026 (slow network)';
-      _lvWatchPollTimer = setTimeout(() => _lvWatchLoop(mid), 8000);
-    });
-  })(matchId);
+  _lvShell();
+  const cached = _lvCacheGet(matchId);
+  if(cached && cached.match) { LV.data = cached; LV.seen = _lvBallKeys(cached); _lvPaint(false); }   // instant repaint on a revisit; rev stays null so the first call returns fresh data
+  window._lvRefresh = (force) => _lvFetch(!!force);
+  _liveViewPollId = 1;
+  await _lvFetch(true);
+  if(token !== LV.token) return;
+  _lvSchedule(token);
+  _lvStreamLoop(matchId, token);
 }
 
-function _drawLiveView(m, st) {
-  const app = document.getElementById('app');
-  const isLive = m.status === 'live';
-  const isDone = m.status === 'completed';
-  const _creatorProfile = _getUserProfile();
-  const _fbUid = (typeof _fbUser !== 'undefined' && _fbUser?.uid) || '__';
-  const _isCreator = _creatorProfile && (m.creator_uid === _fbUid || m.creator_name === _creatorProfile.name || m.creator_phone === _creatorProfile.phone);
-  if ((_isCreator || _isAdmin()) && isLive) localStorage.setItem('cricket_access_' + m.match_id, 'full');
-  const hasFullAccess = localStorage.getItem('cricket_access_' + m.match_id) === 'full';
-  const s = st.score || {};
-  const i1 = m.inn1, i2 = m.inn2;
-  const batFirst = m.batting_first || m.team_a;
-  const batSecond = batFirst === m.team_a ? m.team_b : m.team_a;
+function _lvSchedule(token) {
+  if(token !== LV.token) return;
+  const d = LV.data, st = d && d.match ? d.match.status : 'live';
+  if(st === 'completed') { _liveViewPollId = null; return; }                    // result is in: nothing more will change
+  const inPlay = d && d.current && d.innings.length && d.innings[d.innings.length - 1].status === 'in_progress';
+  const wait = LV.fails ? Math.min(3000 * Math.pow(1.6, LV.fails), 20000) : (inPlay ? 3000 : 6000);
+  LV.timer = setTimeout(async () => { if(token !== LV.token) return; await _lvFetch(false); _lvSchedule(token); }, wait);
+}
 
-  // Use st.score for live current score if inn1 not yet set
-  const _liveScore = st.score || {};
-  const _useInn1 = i1 || (st.innings === 1 && _liveScore.runs !== undefined ? {runs:_liveScore.runs, wickets:_liveScore.wickets, balls:_liveScore.balls} : null);
-  const _useInn2 = i2 || (st.innings === 2 && _liveScore.runs !== undefined ? {runs:_liveScore.runs, wickets:_liveScore.wickets, balls:_liveScore.balls} : null);
-  const s1runs = _useInn1 ? _useInn1.runs+'/'+_useInn1.wickets : '–';
-  const s1ov = _useInn1 ? '('+formatOvers(_useInn1.balls)+' ov)' : '';
-  const s2runs = _useInn2 ? _useInn2.runs+'/'+_useInn2.wickets : '–';
-  const s2ov = _useInn2 ? '('+formatOvers(_useInn2.balls)+' ov)' : '';
-  const needRuns = _useInn2 && _useInn1 ? _useInn1.runs+1-_useInn2.runs : 0;
-  const ballsLeft = _useInn2 ? m.overs*6-_useInn2.balls : 0;
-  const crr = s.balls > 0 ? (s.runs/(s.balls/6)).toFixed(2) : '0.00';
-  const rrr = i2 && ballsLeft > 0 ? (needRuns/(ballsLeft/6)).toFixed(2) : '–';
+async function _lvFetch(force) {
+  if(LV.busy || !LV.mid) return;
+  if(!force && document.hidden) return;                                          // screen off / other tab: sleep
+  const token = LV.token, mid = LV.mid; LV.busy = true;
+  try {
+    const res = await _lvCall({ action: 'get_live_view', match_id: mid, rev: LV.rev || undefined });
+    if(token !== LV.token) return;
+    if(res.error) { if(!LV.data) _lvError(res.error === 'Match not found' ? 'This match could not be found. It may have been deleted.' : res.error); return; }
+    LV.fails = 0; _lvNet(false);
+    if(res.unchanged) return;
+    const first = !LV.data || LV.rev === null;
+    LV.data = res; LV.rev = res.rev; _lvCachePut(mid, res);
+    _lvPaint(!first);
+  } catch(e) {
+    if(token !== LV.token) return;
+    LV.fails++;
+    if(!LV.data) { if(LV.fails >= 2) _lvError('Could not reach the scorer. Check your connection.'); }
+    else if(LV.fails >= 2) _lvNet(true);
+  } finally { if(token === LV.token) LV.busy = false; }
+}
 
-  // current over balls
-  const overBalls = (st.current_over_balls || []);
-  const ballDotsHtml = overBalls.map(b => {
-    const isWkt=b.is_wicket,isWide=b.extra_type==='wide',isNB=b.extra_type==='no_ball';
-    const bg=isWkt?'#ef4444':isNB?'#f59e0b':isWide?'#f59e0b':b.runs===6?'#7c3aed':b.runs===4?'#2563eb':b.runs===0?'#9ca3af':'#16a34a';
-    const lbl=isWkt?'W':isNB?'NB':isWide?'Wd':b.runs===0?'·':String(b.runs);
-    return `<span style="display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:50%;background:${bg};color:#fff;font-size:13px;font-weight:900;margin:2px">${lbl}</span>`;
-  }).join('');
+function _lvNet(show) { const el = document.getElementById('lv-net'); if(el) el.style.display = show ? 'block' : 'none'; }
+function _lvError(msg) {
+  const el = document.getElementById('lv-body'); if(!el) return;
+  LV.html = {}; LV.built = false;
+  el.innerHTML = `<div class="lv-empty"><div style="font-size:34px;margin-bottom:10px">⚠️</div><div style="margin-bottom:14px">${_escHtml(msg)}</div>
+    <button class="lv-btn pri" style="max-width:220px;margin:0 auto" onclick="renderLiveView('${_escHtml(LV.mid)}')">Try again</button></div>`;
+}
 
-  const batsmen = (st.battingCard || st.batting || []).filter(b=>b.is_batting || b.is_on_strike || b.is_batting===undefined);
-  const _bowlerRaw = st.bowler || (st.bowlingCard||[]).find(b=>b.is_bowling) || (st.bowlingCard||[])[0] || null;
-  const bowler = _bowlerRaw;
-  const partnership = st.partnership || null;
-
-  // win probability
-  let probA=50,probB=50;
-  if(i2&&i1){const adv=Math.min(90,Math.max(10,50+(ballsLeft-needRuns*1.2)*1.5));probA=Math.round(adv);probB=100-probA;}
-
-  // scorecard innings builder
-  function _scHtml(inn, innData, label) {
-    if(!innData) return '<div style="text-align:center;padding:24px;color:var(--text2);font-size:13px">Innings not started</div>';
-    const bat=innData.batting||[],bowl=innData.bowling||[];
-    const extras=innData.extras||0,wides=innData.wides||0,noballs=innData.noballs||0;
-    // get_scorecard uses total_runs/total_wickets/total_balls; fallback to runs/wickets/balls
-    const total=innData.total_runs!==undefined?innData.total_runs:(innData.runs!==undefined?innData.runs:(inn?inn.runs:0));
-    const wkts=innData.total_wickets!==undefined?innData.total_wickets:(innData.wickets!==undefined?innData.wickets:(inn?inn.wickets:0));
-    const totalBalls=innData.total_balls!==undefined?innData.total_balls:(innData.balls!==undefined?innData.balls:(inn?inn.balls:0));
-    const ovsStr=formatOvers(totalBalls);
-    const rr=parseFloat(ovsStr)>0?(total/parseFloat(ovsStr)).toFixed(1):'0.0';
-
-    const batRows=bat.filter(b=>b.balls>0||b.runs>0).map(b=>`
-      <tr style="border-bottom:1px solid var(--border)">
-        <td style="padding:9px 8px 9px 0;font-size:13px">
-          <div style="font-weight:700;color:var(--text)">${b.name}${b.is_batting||b.is_on_strike?' <span style="color:#16a34a;font-size:10px">●</span>':''}</div>
-          <div style="font-size:11px;color:var(--text2)">${b.how_out||'<span style="color:#16a34a">not out</span>'}</div>
-        </td>
-        <td style="padding:9px 4px;text-align:center;font-size:14px;font-weight:800;color:var(--text)">${b.runs}</td>
-        <td style="padding:9px 4px;text-align:center;font-size:13px;color:var(--text2)">${b.balls}</td>
-        <td style="padding:9px 4px;text-align:center;font-size:13px;color:#2563eb;font-weight:600">${b.fours||0}</td>
-        <td style="padding:9px 4px;text-align:center;font-size:13px;color:#7c3aed;font-weight:600">${b.sixes||0}</td>
-        <td style="padding:9px 0 9px 4px;text-align:right;font-size:12px;color:var(--text2)">${b.balls?Math.round((b.runs||0)*100/b.balls):'-'}</td>
-      </tr>`).join('');
-
-    const bowlRows=bowl.filter(b=>b.balls>0).map(b=>`
-      <tr style="border-bottom:1px solid var(--border)">
-        <td style="padding:9px 8px 9px 0;font-size:13px;font-weight:700;color:var(--text)">${b.name}</td>
-        <td style="padding:9px 4px;text-align:center;font-size:13px;color:var(--text2)">${formatOvers(b.balls||0)}</td>
-        <td style="padding:9px 4px;text-align:center;font-size:13px;color:var(--text2)">${b.maidens||0}</td>
-        <td style="padding:9px 4px;text-align:center;font-size:13px;color:var(--text)">${b.runs||0}</td>
-        <td style="padding:9px 4px;text-align:center;font-size:14px;font-weight:800;color:#ef4444">${b.wickets||0}</td>
-        <td style="padding:9px 4px;text-align:center;font-size:12px;color:var(--text2)">${b.noballs||0}</td>
-        <td style="padding:9px 4px;text-align:center;font-size:12px;color:var(--text2)">${b.wides||0}</td>
-        <td style="padding:9px 0 9px 4px;text-align:right;font-size:12px;color:var(--text2)">${b.balls?((b.runs||0)/(b.balls/6)).toFixed(1):'-'}</td>
-      </tr>`).join('');
-
-    return `
-      <div style="background:#2d6a4f;color:#fff;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;border-radius:8px 8px 0 0;margin-top:4px">
-        <span style="font-size:14px;font-weight:800">${innData.batting_team||label}</span>
-        <span style="font-size:14px;font-weight:900">${total}/${wkts} <span style="font-size:12px;font-weight:400;opacity:.75">(${ovsStr} Ov)</span></span>
+function _lvShell() {
+  if(!document.getElementById('lv-css')) { const st = document.createElement('style'); st.id = 'lv-css'; st.textContent = LV_CSS; document.head.appendChild(st); }
+  const sk = (h, w) => `<div class="lv-sk" style="height:${h}px;width:${w || '100%'};margin-bottom:10px"></div>`;
+  document.getElementById('app').innerHTML = `<div id="lv-root">
+    <div id="lv-top">
+      <div class="lv-head">
+        <button class="lv-back" onclick="navigate('home')" aria-label="Back to matches">←</button>
+        <div class="lv-title" id="lv-title"><small>BOX CRICKET</small>Loading match…</div>
+        <div id="lv-badge"></div>
+        <button class="lv-share" id="lv-share" style="display:none">Share</button>
       </div>
-      <div style="background:var(--bg-card);border:1px solid var(--border);border-top:none;padding:0 12px">
-        <table style="width:100%;border-collapse:collapse">
-          <tr style="font-size:11px;font-weight:700;color:var(--text2);border-bottom:1px solid var(--border)">
-            <td style="padding:7px 8px 7px 0">BATTER</td>
-            <td style="padding:7px 4px;text-align:center">R</td><td style="padding:7px 4px;text-align:center">B</td>
-            <td style="padding:7px 4px;text-align:center">4s</td><td style="padding:7px 4px;text-align:center">6s</td>
-            <td style="padding:7px 0 7px 4px;text-align:right">SR</td>
-          </tr>
-          ${batRows||'<tr><td colspan="6" style="padding:12px;text-align:center;color:var(--text2);font-size:13px">–</td></tr>'}
-          <tr style="border-top:1px solid var(--border)">
-            <td colspan="2" style="padding:8px 0;font-size:12px;color:var(--text2)">Extras <span style="font-size:11px">(nb ${noballs}, wd ${wides})</span></td>
-            <td colspan="4" style="padding:8px 4px;text-align:right;font-size:13px;font-weight:700;color:var(--text)">${extras}</td>
-          </tr>
-          <tr style="border-top:2px solid var(--border);background:var(--bg)">
-            <td colspan="2" style="padding:8px 0;font-size:13px;font-weight:800;color:var(--text)">Total</td>
-            <td colspan="4" style="padding:8px 4px;text-align:right;font-size:13px;font-weight:800;color:var(--text)">${total}/${wkts} (${ovsStr} Ov, RR: ${rr})</td>
-          </tr>
-        </table>
+      <div class="lv-score" id="lv-score">${sk(26, '60%')}${sk(18, '45%')}</div>
+      <div class="lv-net" id="lv-net" role="status">Reconnecting… showing the last score we received</div>
+      <div class="lv-tabs" id="lv-tabs" role="tablist">
+        <button data-tab="live" class="on" onclick="_lvTab('live')">Live</button>
+        <button data-tab="scorecard" onclick="_lvTab('scorecard')">Scorecard</button>
+        <button data-tab="overs" onclick="_lvTab('overs')">Overs</button>
+        <button data-tab="bet" onclick="_lvTab('bet')">Betting</button>
       </div>
-      ${bowlRows?`
-      <div style="background:var(--bg-card);border:1px solid var(--border);border-top:none;padding:0 12px;border-radius:0 0 8px 8px">
-        <table style="width:100%;border-collapse:collapse">
-          <tr style="font-size:11px;font-weight:700;color:var(--text2);border-bottom:1px solid var(--border)">
-            <td style="padding:7px 8px 7px 0">BOWLER</td>
-            <td style="padding:7px 4px;text-align:center">O</td><td style="padding:7px 4px;text-align:center">M</td>
-            <td style="padding:7px 4px;text-align:center">R</td><td style="padding:7px 4px;text-align:center">W</td>
-            <td style="padding:7px 4px;text-align:center">NB</td><td style="padding:7px 4px;text-align:center">WD</td>
-            <td style="padding:7px 0 7px 4px;text-align:right">ECO</td>
-          </tr>
-          ${bowlRows}
-        </table>
-      </div>`:'<div style="border-radius:0 0 8px 8px;border:1px solid var(--border);border-top:none;height:4px;background:var(--bg-card)"></div>'}`;
+    </div>
+    <div id="lv-body">
+      <div class="lv-pane on" id="lv-pane-live">
+        <div id="lv-s-bat">${sk(96)}</div><div id="lv-s-bowl">${sk(64)}</div><div id="lv-s-key">${sk(120)}</div>
+        <div id="lv-s-actions"></div>
+        <div id="lv-watch-live-wrap" style="display:none">
+          <div id="lv-watch-live-connecting" style="display:none"></div>
+          <button id="lv-watch-live-btn" class="lv-btn pri" style="display:none" onclick="openLiveWatch(LV.mid)">● Watch live video</button>
+        </div>
+        <div id="lv-s-feed"></div>
+      </div>
+      <div class="lv-pane" id="lv-pane-scorecard"><div id="lv-s-sc"></div></div>
+      <div class="lv-pane" id="lv-pane-overs"><div id="lv-s-overs"></div></div>
+      <div class="lv-pane" id="lv-pane-bet"><div id="lv-s-bet"></div></div>
+    </div>
+  </div>`;
+  LV.built = true; LV.html = {};
+}
+
+// Replace a section only when its content changed. Returns true if it did.
+function _lvSet(id, html) {
+  if(LV.html[id] === html) return false;
+  const el = document.getElementById(id); if(!el) return false;
+  el.innerHTML = html; LV.html[id] = html; return true;
+}
+const _lvChip = b => `<span class="lv-chip k${b.k}">${_escHtml(b.c === '0' ? '•' : b.c)}</span>`;
+function _lvBallKeys(d) { const s = new Set(); (d.innings || []).forEach(i => i.over_list.forEach(o => o.balls.forEach(b => s.add(i.n + ':' + b.id)))); return s; }
+
+function _lvPaint(animate) {
+  const d = LV.data; if(!d || !d.match) return;
+  if(!LV.built || !document.getElementById('lv-s-feed')) _lvShell();
+  const m = d.match, E = _escHtml;
+  const isLive = m.status === 'live', isDone = m.status === 'completed';
+  const cur = d.innings.length ? d.innings[d.innings.length - 1] : null;
+
+  // Remember the first commentary line the reader can see, so it can be put back exactly where it was.
+  // (If the newest line is the one in view they are following live: let new balls push in above it.)
+  let anchor = null;
+  if(animate && LV.tab === 'live') {
+    const topEl = document.getElementById('lv-top'); const edge = topEl ? Math.max(0, topEl.getBoundingClientRect().bottom) : 0;
+    const rows = document.querySelectorAll('#lv-s-feed .lv-ball');
+    for(let x = 0; x < rows.length; x++) { const r = rows[x].getBoundingClientRect(); if(r.bottom > edge + 1) { if(x > 0 && r.top < window.innerHeight) anchor = { k: rows[x].dataset.k, top: r.top }; break; } }
   }
 
-  // commentary - group by over
-  const _tlInnings = st._timeline || [];
-  // Build overs list in reverse (latest first)
-  const _tlOvers = [];
-  (_tlInnings).forEach(inn => {
-    (inn.overs||[]).forEach(ov => {
-      const balls = (ov.balls||[]).map((b,bi) => ({...b, _bowler:ov.bowler, _over:ov.over_number, _ball:bi+1, _inn:inn.batting_team}));
-      const overRuns = balls.reduce((s,b)=>(s+(b.runs||0)+(b.extras_runs||0)),0);
-      const overWkts = balls.filter(b=>b.is_wicket).length;
-      _tlOvers.push({over: ov.over_number, bowler: ov.bowler, balls, overRuns, overWkts, inn: inn.batting_team});
+  // scorer / creator access (unchanged behaviour)
+  let full = false;
+  try {
+    const prof = _getUserProfile(); const uid = (typeof _fbUser !== 'undefined' && _fbUser && _fbUser.uid) || '__';
+    const creator = prof && (m.creator_uid === uid || (m.creator_name && m.creator_name === prof.name) || (m.creator_phone && m.creator_phone === prof.phone));
+    if((creator || _isAdmin()) && isLive) localStorage.setItem('cricket_access_' + m.match_id, 'full');
+    full = localStorage.getItem('cricket_access_' + m.match_id) === 'full';
+  } catch(e) {}
+
+  // ---- header ----
+  _lvSet('lv-title', `<small>${m.is_super_over ? 'SUPER OVER' : 'BOX CRICKET'} · ${E(m.overs)} OV${m.ground && m.ground.name ? ' · ' + E(m.ground.name) : ''}</small>${E(m.team_a)} vs ${E(m.team_b)}`);
+  _lvSet('lv-badge', isLive ? '<div class="lv-badge live"><span class="lv-dot"></span>LIVE</div>' : isDone ? '<div class="lv-badge done">RESULT</div>' : '<div class="lv-badge soon">UPCOMING</div>');
+  const sh = document.getElementById('lv-share');
+  if(sh) { sh.style.display = ''; sh.onclick = () => _shareLiveView(m.match_id, m.team_a + ' vs ' + m.team_b); }
+
+  // ---- score block ----
+  const first = m.batting_first || (cur && d.innings[0].batting_team) || m.team_a;
+  const second = first === m.team_a ? m.team_b : m.team_a;
+  const byTeam = {}; d.innings.forEach(i => { (byTeam[i.batting_team] = byTeam[i.batting_team] || []).push(i); });
+  const teamRow = (name) => {
+    const list = byTeam[name] || []; const on = cur && cur.batting_team === name && !isDone;
+    const sc = list.length ? list.map(i => i.runs + '/' + i.wickets).join(' & ') : '';
+    const last = list[list.length - 1];
+    return `<div class="lv-team${on ? ' on' : ''}"><span class="nm">${E(name)}</span>${sc ? `<span class="sc" data-tick="${E(name)}">${sc}</span><span class="ov">(${last.overs} ov)</span>` : `<span class="ov" style="min-width:0">${isDone ? '' : 'yet to bat'}</span>`}</div>`;
+  };
+  const rv = d.current && d.current.review;
+  const review = !isLive || !rv ? '' : rv.active ? '<div class="lv-review wait">📺 THIRD UMPIRE — decision awaited</div>'
+    : rv.verdict === 'out' ? '<div class="lv-review out">THIRD UMPIRE: OUT</div>' : rv.verdict === 'not_out' ? '<div class="lv-review notout">THIRD UMPIRE: NOT OUT</div>' : '';
+  const meta = [];
+  if(cur && cur.balls > 0 && !isDone) meta.push('CRR <b>' + cur.rr.toFixed(2) + '</b>');
+  if(d.rrr != null && isLive) meta.push('REQ <b>' + d.rrr.toFixed(2) + '</b>');
+  if(d.target && !isDone) meta.push('Target <b>' + d.target + '</b>');
+  if(d.projected && isLive) meta.push('Projected <b>' + d.projected + '</b>');
+  const prevScore = LV._scoreText; const scoreText = d.innings.map(i => i.runs + '/' + i.wickets).join('|');
+  _lvSet('lv-score', teamRow(first) + teamRow(second)
+    + (d.status_line ? `<div class="lv-status ${isDone ? 'done' : (d.need != null ? '' : 'calm')}">${E(d.status_line)}</div>` : '')
+    + (meta.length ? `<div class="lv-meta">${meta.join(' &nbsp;·&nbsp; ')}</div>` : '') + review);
+  if(animate && prevScore !== undefined && prevScore !== scoreText && cur) {
+    const el = document.querySelector('#lv-score .lv-team.on .sc'); if(el) { el.classList.remove('lv-tick'); void el.offsetWidth; el.classList.add('lv-tick'); }
+  }
+  LV._scoreText = scoreText;
+
+  // ---- Live: batters, bowler, key stats ----
+  const showCrease = cur && cur.status === 'in_progress' && d.current;
+  _lvSet('lv-s-bat', showCrease && d.current.batters.length ? `<div class="lv-card"><table class="lv-tbl">
+      <tr><th>Batter</th><th>R</th><th>B</th><th>4s</th><th>6s</th><th>SR</th></tr>
+      ${d.current.batters.map(b => `<tr class="${b.strike ? 'cur' : ''}"><td class="nm">${E(b.name)}${b.strike ? ' *' : ''}</td><td class="big">${b.runs}</td><td>${b.balls}</td><td>${b.fours}</td><td>${b.sixes}</td><td>${b.balls ? b.sr.toFixed(1) : '–'}</td></tr>`).join('')}
+    </table></div>` : '');
+  const bw = showCrease ? d.current.bowler : null;
+  _lvSet('lv-s-bowl', bw ? `<div class="lv-card"><table class="lv-tbl">
+      <tr><th>Bowler</th><th>O</th><th>M</th><th>R</th><th>W</th><th>ECO</th></tr>
+      <tr class="cur"><td class="nm">${E(bw.name)} *</td><td>${bw.overs}</td><td>${bw.maidens}</td><td>${bw.runs}</td><td class="big">${bw.wickets}</td><td>${bw.balls ? bw.eco.toFixed(1) : '–'}</td></tr>
+    </table></div>` : '');
+  let key = '';
+  if(cur) {
+    const recent = []; const ovs = cur.over_list.slice(-3);
+    ovs.forEach((o, x) => { if(x) recent.push('<span class="lv-sep"></span>'); o.balls.forEach(b => recent.push(_lvChip(b))); });
+    const lw = d.current && d.current.last_wicket, pt = d.current && d.current.partnership;
+    const rows = [];
+    if(showCrease && d.current.this_over.length) rows.push(['This over', `<div class="lv-chips">${d.current.this_over.map(_lvChip).join('')}</div>`]);
+    if(showCrease && pt) rows.push(['Partnership', pt.runs + ' (' + pt.balls + ')']);
+    if(lw) rows.push(['Last wicket', E(lw.name) + ' ' + E(lw.how) + ' ' + lw.runs + ' (' + lw.balls + ') – ' + lw.score + '/' + lw.wicket + ' in ' + lw.over + ' ov']);
+    if(recent.length) rows.push(['Recent', `<div class="lv-chips">${recent.join('')}</div>`]);
+    if(m.toss_winner && m.batting_first) rows.push(['Toss', E(m.toss_winner) + ' chose to ' + (m.batting_first === m.toss_winner ? 'bat' : 'bowl')]);
+    key = rows.length ? `<div class="lv-card">${rows.map(r => `<div class="lv-kv"><span class="k">${r[0]}</span><span class="v">${r[1]}</span></div>`).join('')}</div>` : '';
+  } else {
+    key = `<div class="lv-empty"><div style="font-size:34px;margin-bottom:8px">🏏</div>${E(d.status_line || 'Match yet to begin')}<div style="font-size:12.5px;margin-top:6px">The score will appear here by itself when the first ball is bowled.</div></div>`;
+  }
+  _lvSet('lv-s-key', key);
+
+  // ---- actions ----
+  let canNotify = false;
+  try { canNotify = isLive && 'Notification' in window && 'serviceWorker' in navigator && Notification.permission === 'default' && !localStorage.getItem('push_inline_dismissed'); } catch(e) {}
+  _lvSet('lv-s-actions', (full && isLive ? `<button class="lv-btn pri" onclick="navigate('scoring/${E(m.match_id)}')">🏏 Open scoring panel</button>` : '')
+    + (canNotify ? `<button class="lv-btn quiet" onclick="try{localStorage.setItem('push_inline_dismissed','1')}catch(e){};this.remove();_allowPush()">🔔 Tell me about wickets and the result</button>` : ''));
+  const wrap = document.getElementById('lv-watch-live-wrap'); if(wrap) wrap.style.display = isLive ? '' : 'none';
+
+  // ---- ball-by-ball (newest first), keeping the reader's place ----
+  const keys = _lvBallKeys(d); const fresh = (animate && LV.seen) ? [...keys].filter(k => !LV.seen.has(k)) : [];
+  let feed = '';
+  d.innings.slice().reverse().forEach(i => {
+    if(!i.over_list.length) return;
+    feed += `<div class="lv-card">${d.innings.length > 1 ? `<div class="lv-ovbar"><b>${E(i.batting_team)} innings</b><span class="r">${i.runs}/${i.wickets} (${i.overs})</span></div>` : ''}`;
+    i.over_list.slice().reverse().forEach(o => {
+      if(o.done) feed += `<div class="lv-ovbar"><span>End of over <b>${o.n}</b></span><span>${E(o.bowler || '')}</span><span class="r">${o.runs} run${o.runs === 1 ? '' : 's'}${o.wkts ? ', ' + o.wkts + ' wkt' : ''} · ${o.score}</span></div>`;
+      o.balls.slice().reverse().forEach(b => {
+        const isNew = fresh.indexOf(i.n + ':' + b.id) >= 0;
+        const txt = E(b.t).replace(/(FOUR|SIX|OUT!)/g, '<b>$1</b>');
+        feed += `<div class="lv-ball k${b.k}${isNew ? ' new' : ''}" data-k="${i.n}:${b.id}"><span class="n">${b.l}</span>${_lvChip(b)}<span class="t">${txt}</span></div>`;
+      });
     });
+    feed += '</div>';
   });
-  const commentaryHtml = _tlOvers.length ? _tlOvers.slice().reverse().map(ov => {
-    const ballDots = ov.balls.slice().reverse().map(b => {
-      const isWkt=b.is_wicket,isWide=b.extras_type==='wide',isNB=b.extras_type==='noball';
-      const tr=(b.runs||0)+(b.extras_runs||0);
-      const bg=isWkt?'#ef4444':isNB?'#f59e0b':isWide?'#f59e0b':tr===6?'#7c3aed':tr===4?'#2563eb':tr===0?'#9ca3af':'#16a34a';
-      const lbl=isWkt?'W':isNB?'NB':isWide?'Wd':tr===0?'·':String(tr);
-      return `<span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:${bg};color:#fff;font-size:11px;font-weight:900">${lbl}</span>`;
-    }).join('');
-    const ballRows = ov.balls.slice().reverse().map(b => {
-      const isWkt=b.is_wicket,isWide=b.extras_type==='wide',isNB=b.extras_type==='noball';
-      const tr=(b.runs||0)+(b.extras_runs||0);
-      const dotBg=isWkt?'#ef4444':isNB?'#f59e0b':isWide?'#f59e0b':tr===6?'#7c3aed':tr===4?'#2563eb':tr===0?'#9ca3af':'#16a34a';
-      const dot=isWkt?'W':isNB?'NB':isWide?'Wd':tr===0?'·':String(tr);
-      const rowBg=isWkt?'rgba(239,68,68,0.06)':tr===6?'rgba(124,58,237,0.04)':tr===4?'rgba(37,99,235,0.04)':'transparent';
-      const overLbl=(b._over+1)+'.'+b._ball;
-      const desc=b.description
-        ?(isWkt?'<strong>WICKET!</strong> ':isWide?'<strong>Wide.</strong> ':isNB?'<strong>No ball.</strong> ':tr===6?'<strong>SIX!</strong> ':tr===4?'<strong>FOUR!</strong> ':'')+b.description
-        :isWkt?`<strong>WICKET!</strong> ${b.batsman||''}`
-          :isWide?'Wide ball':isNB?'No ball'
-          :tr===6?`<strong>SIX!</strong> ${b.batsman||''}`
-          :tr===4?`<strong>FOUR!</strong> ${b.batsman||''}`
-          :tr===0?'Dot ball'
-          :`${tr} run${tr!==1?'s':''}`;
-      return `<div style="display:flex;align-items:flex-start;gap:10px;padding:9px 12px;border-bottom:1px solid var(--border);background:${rowBg}">
-        <div style="flex-shrink:0;text-align:center;min-width:46px">
-          <div style="font-size:10px;color:var(--text2);margin-bottom:3px;font-weight:600">${overLbl}</div>
-          <div style="width:28px;height:28px;border-radius:50%;background:${dotBg};color:#fff;font-size:11px;font-weight:900;display:inline-flex;align-items:center;justify-content:center">${dot}</div>
-        </div>
-        <div style="font-size:13px;color:var(--text);padding-top:3px;flex:1">${desc}</div>
-      </div>`;
-    }).join('');
-    return `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:10px">
-      <div style="background:var(--bg);padding:10px 12px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)">
-        <div>
-          <span style="font-size:13px;font-weight:800;color:var(--text)">Over ${ov.over+1}</span>
-          <span style="font-size:12px;color:var(--text2);margin-left:8px">${ov.bowler||''}</span>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <div style="display:flex;gap:3px">${ballDots}</div>
-          <span style="font-size:12px;font-weight:700;color:var(--text);background:var(--border);padding:2px 8px;border-radius:8px">${ov.overRuns} runs${ov.overWkts?' · '+ov.overWkts+' wkt':''}</span>
-        </div>
-      </div>
-      ${ballRows}
-    </div>`;
-  }).join('') : '<div style="text-align:center;padding:32px;color:var(--text2)">No commentary yet</div>';
+  _lvSet('lv-s-feed', feed);
+  LV.seen = keys;
+  if(anchor) { const row = document.querySelector('#lv-s-feed .lv-ball[data-k="' + anchor.k + '"]'); if(row) { const dy = row.getBoundingClientRect().top - anchor.top; if(Math.abs(dy) >= 1) window.scrollBy({ top: dy, left: 0, behavior: 'instant' }); } }
 
-  // betting
-  const overs1=i1?i1.balls/6:0;
-  const projA=overs1>0.5?Math.round((i1.runs/overs1)*m.overs):'–';
-  const oddsA=i2?Math.min(9.9,Math.max(1.05,1+(needRuns*0.04))).toFixed(2):'1.80';
-  const oddsB=i2?Math.min(9.9,Math.max(1.05,1+(ballsLeft*0.025))).toFixed(2):'2.10';
+  _lvPaintScorecard();
 
-  const statusBanner=isDone&&m.winner
-    ?`<div style="background:#16a34a;color:#fff;padding:9px;text-align:center;font-size:13px;font-weight:800">\u{1F3C6} ${m.winner} won!</div>`
-    :isDone?`<div style="background:#6b7280;color:#fff;padding:9px;text-align:center;font-size:13px;font-weight:800">Match Tied</div>`:'';
+  // ---- overs ----
+  let ov = '';
+  d.innings.slice().reverse().forEach(i => {
+    if(!i.over_list.length) return;
+    ov += `<div class="lv-card">${d.innings.length > 1 ? `<div class="lv-ovbar"><b>${E(i.batting_team)}</b><span class="r">${i.runs}/${i.wickets}</span></div>` : ''}`
+      + i.over_list.slice().reverse().map(o => `<div class="lv-kv"><span class="k" style="min-width:74px"><b style="color:var(--text)">Ov ${o.n}</b><br><span style="font-size:11.5px">${E(o.bowler || '')}</span></span><span class="v" style="flex:1"><div class="lv-chips">${o.balls.map(_lvChip).join('')}</div></span><span style="font-weight:800;white-space:nowrap;font-variant-numeric:tabular-nums">${o.runs}${o.wkts ? '-' + o.wkts : ''}<br><span style="font-weight:500;font-size:11.5px;color:var(--text2)">${o.score}</span></span></div>`).join('') + '</div>';
+  });
+  _lvSet('lv-s-overs', ov || '<div class="lv-empty">No overs bowled yet</div>');
 
-  const cur=_liveViewTab;
-
-  // Use get_scorecard data for scorecard tab
-  const _sc = st._scorecard || [];
-  const inn1Raw = _sc[0] || (i1 ? {total_runs:i1.runs, total_wickets:i1.wickets, total_balls:i1.balls, batting_team:batFirst, batting:[], bowling:[]} : null);
-  const inn2Raw = _sc[1] || (i2 ? {total_runs:i2.runs, total_wickets:i2.wickets, total_balls:i2.balls, batting_team:batSecond, batting:[], bowling:[]} : null);
-
-  // 3rd Umpire review overlay
-  const _rev = st.review || null;
-  const _reviewHtml = !isLive ? '' : _rev && _rev.active ? `
-    <div style="position:fixed;inset:0;z-index:998;background:rgba(0,0,0,0.88);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;pointer-events:none">
-      <div style="font-size:52px;animation:cb-pulse 0.8s infinite">📺</div>
-      <div style="color:#f59e0b;font-size:13px;font-weight:800;letter-spacing:3px;text-transform:uppercase">Third Umpire</div>
-      <div style="color:#fff;font-size:30px;font-weight:900;letter-spacing:2px;text-align:center;line-height:1.1">UNDER<br>REVIEW</div>
-      <div style="display:flex;align-items:center;gap:6px;margin-top:4px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;animation:cb-pulse 1s infinite"></span><span style="color:rgba(255,255,255,0.5);font-size:12px;font-weight:600">Decision awaited…</span></div>
-    </div>
-  ` : _rev && !_rev.active && _rev.verdict === 'out' ? `
-    <div style="position:fixed;inset:0;z-index:998;background:rgba(153,27,27,0.96);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;pointer-events:none">
-      <div style="font-size:64px">🚨</div>
-      <div style="color:rgba(255,255,255,0.7);font-size:13px;font-weight:800;letter-spacing:3px">THIRD UMPIRE DECISION</div>
-      <div style="color:#fff;font-size:72px;font-weight:900;letter-spacing:6px;text-shadow:0 0 40px rgba(255,100,100,0.8)">OUT</div>
-    </div>
-  ` : _rev && !_rev.active && _rev.verdict === 'not_out' ? `
-    <div style="position:fixed;inset:0;z-index:998;background:rgba(20,83,45,0.96);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;pointer-events:none">
-      <div style="font-size:64px">✅</div>
-      <div style="color:rgba(255,255,255,0.7);font-size:13px;font-weight:800;letter-spacing:3px">THIRD UMPIRE DECISION</div>
-      <div style="color:#fff;font-size:48px;font-weight:900;letter-spacing:4px;text-align:center;text-shadow:0 0 40px rgba(100,255,150,0.8)">NOT OUT</div>
-    </div>
-  ` : '';
-
-  app.innerHTML=`${_reviewHtml}
-    <div style="background:#1a1a2e;padding:14px 16px 10px;display:flex;align-items:center;gap:10px">
-      <button onclick="navigate('home')" style="background:none;border:none;color:rgba(255,255,255,0.7);font-size:22px;padding:0;cursor:pointer;line-height:1">←</button>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:10px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:.5px;text-transform:uppercase">BOX CRICKET · ${m.overs} OV</div>
-        <div style="font-size:15px;font-weight:800;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${m.team_a} vs ${m.team_b}</div>
-      </div>
-      ${isLive?'<div style="display:flex;align-items:center;gap:5px;color:#ff4444;font-size:11px;font-weight:700"><span style="width:7px;height:7px;border-radius:50%;background:#ff4444;animation:cb-pulse 1s infinite"></span>LIVE</div>':isDone?'<span style="color:rgba(255,255,255,0.5);font-size:12px">RESULT</span>':''}
-      <button onclick="_shareLiveView('${m.match_id}','${m.team_a.replace(/'/g,"\\'")} vs ${m.team_b.replace(/'/g,"\\'")}')" style="background:rgba(37,211,102,0.2);border:1px solid rgba(37,211,102,0.4);color:#25D366;font-size:12px;font-weight:700;padding:6px 10px;border-radius:20px;cursor:pointer;touch-action:manipulation;white-space:nowrap">📤 Share</button>
-    </div>
-    ${statusBanner}
-
-    <div style="background:#1a1a2e;padding:12px 16px 16px;color:#fff">
-      <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:8px">
-        <div>
-          <div style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:600;margin-bottom:2px">${batFirst}</div>
-          <div style="font-size:28px;font-weight:900">${s1runs} <span style="font-size:13px;font-weight:400;color:rgba(255,255,255,0.5)">${s1ov}</span></div>
-        </div>
-        <div style="text-align:right">
-          <div style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:600;margin-bottom:2px">${batSecond}</div>
-          <div style="font-size:${i2?'28':'18'}px;font-weight:${i2?'900':'400'};color:${i2?'#fff':'rgba(255,255,255,0.3)'}">${s2runs} <span style="font-size:13px;font-weight:400;color:rgba(255,255,255,0.5)">${s2ov}</span></div>
-        </div>
-      </div>
-      ${isLive&&_useInn2?`<div style="background:rgba(208,2,27,0.85);border-radius:8px;padding:7px 10px;font-size:13px;font-weight:700;text-align:center">${batSecond} need ${needRuns} off ${ballsLeft} balls · RRR: ${rrr}</div>`
-        :isLive&&s.balls>0?`<div style="font-size:12px;color:rgba(255,255,255,0.55);text-align:center">CRR: ${crr}</div>`:''}
-    </div>
-
-    <div style="background:var(--bg-card);border-bottom:1px solid var(--border);display:flex;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch">
-      <button id="lv-tab-live" onclick="_lvTab('live')" style="flex:1;min-width:60px;padding:12px 6px;background:none;border:none;border-bottom:2px solid transparent;font-size:13px;cursor:pointer;white-space:nowrap;touch-action:manipulation;color:var(--text2)">Live</button>
-      <button id="lv-tab-scorecard" onclick="_lvTab('scorecard')" style="flex:1;min-width:80px;padding:12px 6px;background:none;border:none;border-bottom:2px solid transparent;font-size:13px;cursor:pointer;white-space:nowrap;touch-action:manipulation;color:var(--text2)">Scorecard</button>
-      <button id="lv-tab-commentary" onclick="_lvTab('commentary')" style="flex:1;min-width:90px;padding:12px 6px;background:none;border:none;border-bottom:2px solid transparent;font-size:13px;cursor:pointer;white-space:nowrap;touch-action:manipulation;color:var(--text2)">Commentary</button>
-      <button id="lv-tab-bet" onclick="_lvTab('bet')" style="flex:1;min-width:70px;padding:12px 6px;background:none;border:none;border-bottom:2px solid transparent;font-size:13px;cursor:pointer;white-space:nowrap;touch-action:manipulation;color:var(--text2)">Betting</button>
-    </div>
-
-    <div style="flex:1;overflow-y:auto;padding-bottom:calc(70px + env(safe-area-inset-bottom,0px))">
-
-      <div id="lv-pane-live" style="display:none;padding:12px">
-        ${overBalls.length>0?`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px"><div style="font-size:11px;font-weight:800;color:var(--text2);letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px">This Over</div><div style="display:flex;flex-wrap:wrap;gap:4px">${ballDotsHtml}</div></div>`:''}
-        ${batsmen.length>0?`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:10px"><table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="font-size:11px;font-weight:700;color:var(--text2);border-bottom:1px solid var(--border)"><td style="padding:8px 12px">BATTER</td><td style="padding:8px 6px;text-align:center">R</td><td style="padding:8px 6px;text-align:center">B</td><td style="padding:8px 6px;text-align:center">4s</td><td style="padding:8px 6px;text-align:center">6s</td><td style="padding:8px 12px;text-align:right">SR</td></tr>${batsmen.map(b=>`<tr style="border-bottom:1px solid var(--border)"><td style="padding:10px 12px;font-weight:${b.on_strike?'800':'600'};color:var(--text)">${b.name}${b.on_strike?' *':''}</td><td style="padding:10px 6px;text-align:center;font-weight:800;font-size:14px;color:var(--text)">${b.runs||0}</td><td style="padding:10px 6px;text-align:center;color:var(--text2)">${b.balls||0}</td><td style="padding:10px 6px;text-align:center;color:#2563eb;font-weight:600">${b.fours||0}</td><td style="padding:10px 6px;text-align:center;color:#7c3aed;font-weight:600">${b.sixes||0}</td><td style="padding:10px 12px;text-align:right;color:var(--text2)">${b.balls?Math.round((b.runs||0)*100/b.balls):'-'}</td></tr>`).join('')}</table></div>`:''}
-        ${bowler?`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:10px"><table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="font-size:11px;font-weight:700;color:var(--text2);border-bottom:1px solid var(--border)"><td style="padding:8px 12px">BOWLER</td><td style="padding:8px 6px;text-align:center">O</td><td style="padding:8px 6px;text-align:center">R</td><td style="padding:8px 6px;text-align:center">W</td><td style="padding:8px 12px;text-align:right">ECO</td></tr><tr><td style="padding:10px 12px;font-weight:700;color:var(--text)">${bowler.name} *</td><td style="padding:10px 6px;text-align:center;color:var(--text2)">${formatOvers(bowler.balls||0)}</td><td style="padding:10px 6px;text-align:center;color:var(--text)">${bowler.runs||0}</td><td style="padding:10px 6px;text-align:center;font-weight:800;color:#ef4444">${bowler.wickets||0}</td><td style="padding:10px 12px;text-align:right;color:var(--text2)">${bowler.balls?((bowler.runs||0)/(bowler.balls/6)).toFixed(1):'–'}</td></tr></table></div>`:''}
-        ${partnership?`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:10px;font-size:13px;color:var(--text2)">\u{1F91D} Partnership: <strong style="color:var(--text)">${partnership.runs||0}(${partnership.balls||0})</strong></div>`:''}
-        ${!batsmen.length&&!overBalls.length?'<div style="text-align:center;padding:40px 0;color:var(--text2)">Match not started yet</div>':''}
-        ${hasFullAccess&&isLive?`<button onclick="navigate('scoring/${m.match_id}')" style="width:100%;padding:13px;background:#d0021b;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;margin-top:6px;touch-action:manipulation">\u{1F3CF} Open Scoring Panel</button>`:''}
-        ${isDone?`<button onclick="_lvTab('scorecard')" style="width:100%;padding:12px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;color:var(--text);touch-action:manipulation;margin-top:6px">\u{1F4CA} View Full Scorecard</button>`:''}
-        ${isLive?`<div id="lv-watch-live-wrap" style="margin-top:8px">
-          <div id="lv-watch-live-connecting" style="text-align:center;padding:10px;color:rgba(150,150,150,0.8);font-size:12px">📡 Checking for live stream…</div>
-          <button id="lv-watch-live-btn" onclick="openLiveWatch('${m.match_id}')" style="width:100%;padding:13px;background:linear-gradient(135deg,#dc2626,#991b1b);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;touch-action:manipulation;animation:livepulse 1.5s ease-in-out infinite;display:none">● Watch Live</button>
-        </div>`:''}
-      </div>
-
-      <div id="lv-pane-scorecard" style="display:none;padding:12px">
-        ${i1||i2?`
-        <div style="display:flex;gap:8px;margin-bottom:8px">
-          ${i1?`<button id="lv-sc-btn1" onclick="_lvScTab(1)" style="padding:7px 14px;border-radius:20px;border:none;background:#2d6a4f;color:#fff;font-size:12px;font-weight:700;cursor:pointer;touch-action:manipulation">${batFirst} (1st Inn)</button>`:''}
-          ${i2?`<button id="lv-sc-btn2" onclick="_lvScTab(2)" style="padding:7px 14px;border-radius:20px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;touch-action:manipulation">${batSecond} (2nd Inn)</button>`:''}
-        </div>
-        <div id="lv-sc-inn1">${_scHtml(i1,inn1Raw,batFirst)}</div>
-        <div id="lv-sc-inn2" style="display:none">${_scHtml(i2,inn2Raw,batSecond)}</div>
-        `:'<div style="text-align:center;padding:40px 0;color:var(--text2)">No scorecard yet</div>'}
-      </div>
-
-      <div id="lv-pane-commentary" style="display:none;padding:12px">${commentaryHtml}</div>
-
-      <div id="lv-pane-bet" style="display:none;padding:12px">
-
+  // ---- betting (same content as before the rebuild) ----
+  const i1 = d.innings[0], i2 = d.innings[1];
+  const batFirst = E(first), batSecond = E(second);
+  const needRuns = d.need || 0, ballsLeft = d.balls_left || 0;
+  const crr = cur && cur.balls > 0 ? cur.rr.toFixed(2) : '0.00';
+  const overs1 = i1 ? i1.balls / 6 : 0;
+  const projA = overs1 > 0.5 ? Math.round((i1.runs / overs1) * m.overs) : '–';
+  const oddsA = i2 ? Math.min(9.9, Math.max(1.05, 1 + (needRuns * 0.04))).toFixed(2) : '1.80';
+  const oddsB = i2 ? Math.min(9.9, Math.max(1.05, 1 + (ballsLeft * 0.025))).toFixed(2) : '2.10';
+  let probA = 50, probB = 50;
+  if(i2 && i1) { const adv = Math.min(90, Math.max(10, 50 + (ballsLeft - needRuns * 1.2) * 1.5)); probA = Math.round(adv); probB = 100 - probA; }
+  _lvSet('lv-s-bet', `
         <!-- ── AI Analysis Panel — Coming Soon ───────────────────────── -->
         <div style="background:linear-gradient(135deg,#0f0c29 0%,#302b63 60%,#1a1a3e 100%);border-radius:14px;padding:16px;margin-bottom:14px">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
             <span style="font-size:18px">🤖</span>
             <span style="color:#a78bfa;font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:1px">AI Analysis</span>
-            <span style="background:rgba(167,139,250,0.2);border:1px solid rgba(167,139,250,0.35);color:#a78bfa;border-radius:20px;padding:2px 9px;font-size:10px;font-weight:700">Coming Soon</span>
+            <span style="background:rgba(167,139,250,0.2);border:1px solid rgba(167,139,250,0.35);color:#a78bfa;border-radius:20px;padding:2px 9px;font-size:11px;font-weight:700">Coming Soon</span>
           </div>
           <div style="display:flex;flex-direction:column;gap:7px">
             ${[['🎯','Win Probability (AI-powered)'],['📊','Key Factors & Momentum Indicator'],['🔮','Next-Over Run Prediction'],['💬','Live Match Narrative by Claude AI'],['📈','Auto-learns from every match']].map(([ic,txt])=>`
@@ -10824,7 +10919,7 @@ function _drawLiveView(m, st) {
               <span style="color:rgba(255,255,255,0.7);font-size:12px;font-weight:600">${txt}</span>
             </div>`).join('')}
           </div>
-          <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.08);color:rgba(255,255,255,0.25);font-size:10px">Powered by Claude AI · Setup required</div>
+          <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.08);color:rgba(255,255,255,0.25);font-size:11px">Powered by Claude AI · Setup required</div>
         </div>
 
         <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:9px 12px;margin-bottom:14px;font-size:12px;color:#92400e">⚠️ Indicative odds for entertainment only.</div>
@@ -10845,21 +10940,44 @@ function _drawLiveView(m, st) {
           <div style="flex:1;background:#dcfce7;border-radius:10px;padding:12px;text-align:center"><div style="font-size:11px;color:#166534;font-weight:700">UNDER</div><div style="font-size:22px;font-weight:900;color:#166534">${Math.max(4,Math.round(needRuns/Math.max(1,Math.ceil(ballsLeft/6)))-1)}</div></div>
           <div style="flex:1;background:#fee2e2;border-radius:10px;padding:12px;text-align:center"><div style="font-size:11px;color:#dc2626;font-weight:700">OVER</div><div style="font-size:22px;font-weight:900;color:#dc2626">${Math.max(5,Math.round(needRuns/Math.max(1,Math.ceil(ballsLeft/6))))}</div></div>
         </div>`:''}
-      </div>
+`);
+
+  _lvTab(LV.tab);
+  const btn = document.getElementById('lv-watch-live-btn'); if(btn) btn.style.display = _lvStreamActive && isLive ? 'block' : 'none';
+}
+
+function _lvPaintScorecard() {
+  const d = LV.data; if(!d) return; const E = _escHtml;
+  if(!d.innings.length) { _lvSet('lv-s-sc', '<div class="lv-empty">The scorecard starts with the first ball</div>'); return; }
+  const html = d.innings.map(i => {
+    const open = _lvInnOpen(i.n); const x = i.extras;
+    const head = `<button class="lv-inn" onclick="_lvToggleInn(${i.n})" aria-expanded="${open}"><span class="a">${open ? '▾' : '▸'}</span><span>${E(i.batting_team)}</span><span class="s">${i.runs}/${i.wickets} <small>(${i.overs} ov)</small></span></button>`;
+    if(!open) return `<div class="lv-card">${head}</div>`;
+    const bat = i.batting.map(b => `<tr class="${b.batting ? 'cur' : ''}"><td class="nm">${E(b.name)}${b.strike ? ' *' : ''}<small>${b.out ? E(b.how) : (b.batting && i.status === 'in_progress' && d.match.status !== 'completed' ? 'batting' : 'not out')}</small></td><td class="big">${b.runs}</td><td>${b.balls}</td><td>${b.fours}</td><td>${b.sixes}</td><td>${b.balls ? b.sr.toFixed(1) : '–'}</td></tr>`).join('');
+    const bowl = i.bowling.map(b => `<tr><td class="nm">${E(b.name)}${b.current && i.status === 'in_progress' ? ' *' : ''}</td><td>${b.overs}</td><td>${b.maidens}</td><td>${b.runs}</td><td class="${b.wickets ? 'w' : ''}">${b.wickets}</td><td>${b.noballs}</td><td>${b.wides}</td><td>${b.balls ? b.eco.toFixed(1) : '–'}</td></tr>`).join('');
+    return `<div class="lv-card">${head}
+      <table class="lv-tbl"><tr><th>Batter</th><th>R</th><th>B</th><th>4s</th><th>6s</th><th>SR</th></tr>${bat || '<tr><td colspan="6" class="nm">–</td></tr>'}</table>
+      <div class="lv-row2"><span>Extras</span><span><b style="color:var(--text)">${x.total}</b> <span style="color:var(--text2)">(b ${x.b}, lb ${x.lb}, w ${x.wd}, nb ${x.nb})</span></span></div>
+      <div class="lv-row2 tot"><span>Total</span><span>${i.runs}/${i.wickets} (${i.overs} ov, RR ${i.rr.toFixed(2)})</span></div>
+      ${i.dnb.length ? `<div class="lv-note"><b>${i.status === 'completed' || d.match.status === 'completed' ? 'Did not bat' : 'Yet to bat'}:</b> ${i.dnb.map(E).join(', ')}</div>` : ''}
+      ${i.fow.length ? `<div class="lv-note"><b>Fall of wickets:</b> ${i.fow.map(f => f.score + '-' + f.n + ' (' + E(f.name) + ', ' + f.over + ')').join(', ')}</div>` : ''}
+      ${bowl ? `<table class="lv-tbl" style="border-top:1px solid var(--border)"><tr><th>Bowler</th><th>O</th><th>M</th><th>R</th><th>W</th><th>NB</th><th>WD</th><th>ECO</th></tr>${bowl}</table>` : ''}
     </div>`;
+  }).reverse().join('');
+  _lvSet('lv-s-sc', html);
+}
 
-  _lvTab(cur);
-  if(_liveViewScInn === 2) _lvScTab(2);
-
-  // Restore live watch button state — persistent poll runs separately (no per-render re-poll)
-  if(isLive) {
-    const btn = document.getElementById('lv-watch-live-btn');
-    const connecting = document.getElementById('lv-watch-live-connecting');
-    if(_lvStreamActive) {
-      if(btn) btn.style.display = 'block';
-      if(connecting) connecting.style.display = 'none';
-    }
-  }
+// Live video stream availability (unchanged feature): a slow, separate check.
+function _lvStreamLoop(mid, token) {
+  if(token !== LV.token) return;
+  const next = ms => { _lvWatchPollTimer = setTimeout(() => _lvStreamLoop(mid, token), ms); };
+  if(document.hidden || !LV.data || LV.data.match.status !== 'live') { if(LV.data && LV.data.match.status === 'completed') return; next(20000); return; }
+  _lvCall({ action: 'get_live', match_id: mid }, 9000).then(data => {
+    if(token !== LV.token) return;
+    _lvStreamActive = !!(data && data.active);
+    const btn = document.getElementById('lv-watch-live-btn'); if(btn) btn.style.display = _lvStreamActive ? 'block' : 'none';
+    next(20000);
+  }).catch(() => next(30000));
 }
 
 
@@ -11043,16 +11161,8 @@ function _dismissPush() {
 // Ask only when someone is following a match or looking at a result — not on first open,
 // and never over the scoring pad.
 window.addEventListener('hashchange', () => {
-  const pg = getRoute().page;
-  if (pg === 'live' || pg === 'summary') setTimeout(() => {
-    const now = getRoute().page;
-    if (now === 'live' || now === 'summary') _showPushPrompt();
-  }, 6000);
+  if (getRoute().page === 'summary') setTimeout(() => { if (getRoute().page === 'summary' && localStorage.getItem('cricket_onboarded')) _showPushPrompt(); }, 6000);
 });
-setTimeout(() => {                       // opened straight from a shared live link
-  const pg = getRoute().page;
-  if (pg === 'live' || pg === 'summary') _showPushPrompt();
-}, 6000);
 
 // Handle navigate messages from service worker notification click
 navigator.serviceWorker?.addEventListener('message', e => {
@@ -11200,7 +11310,11 @@ function showOnboarding() {
   render();
 }
 
+const _VIEWER_PAGES = ['live', 'scorecard', 'summary', 'timeline'];
+let _onboardingPending = false;
 function _checkOnboarding() {
+  if(_VIEWER_PAGES.includes(getRoute().page)) { _onboardingPending = true; return; }   // opened from a shared link: show the match, not a slideshow
+  _onboardingPending = false;
   if(!localStorage.getItem('cricket_onboarded')) {
     showOnboarding();
   } else if(!_getUserProfile()) {
