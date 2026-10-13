@@ -14,6 +14,13 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#127951;</text></svg>">
 <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%2316a34a'/><text y='.9em' font-size='90' x='5'>&#127951;</text></svg>">
 <link rel="manifest" href="manifest.json">
+<link rel="preconnect" href="https://n8n.barandates.in" crossorigin>
+<script>
+// Someone opening a shared live link wants the score, now. Ask for it before anything else on this page
+// loads; the viewer picks this answer up when it starts (see _lvFetch).
+(function(){ var m = /^#live\/([A-Za-z0-9_-]+)/.exec(location.hash); if(!m) return;
+  try { window.__lvEarly = { mid: m[1], p: fetch('https://n8n.barandates.in/webhook/cricket', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ action: 'get_live_view', match_id: m[1] }) }).then(function(r){ return r.json(); }) }; } catch(e) {} })();
+</script>
 <script>
 if('serviceWorker' in navigator){
   const isN8n = location.hostname.includes('n8n') || location.pathname.includes('/webhook/');
@@ -21,7 +28,7 @@ if('serviceWorker' in navigator){
   else{navigator.serviceWorker.register('sw.js').catch(()=>{});}
 }
 </script>
-<script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
 tailwind.config = {
@@ -10698,7 +10705,10 @@ async function _lvFetch(force) {
   if(!force && document.hidden) return;                                          // screen off / other tab: sleep
   const token = LV.token, mid = LV.mid; LV.busy = true;
   try {
-    const res = await _lvCall({ action: 'get_live_view', match_id: mid, rev: LV.rev || undefined });
+    let res = null;
+    const early = window.__lvEarly;                          // the request made at the very top of the page
+    if(early && early.mid === mid && !LV.rev) { window.__lvEarly = null; try { res = await early.p; } catch(e) { res = null; } }
+    if(!res || typeof res !== 'object') res = await _lvCall({ action: 'get_live_view', match_id: mid, rev: LV.rev || undefined });
     if(token !== LV.token) return;
     if(res.error) { if(!LV.data) _lvError(res.error === 'Match not found' ? 'This match could not be found. It may have been deleted.' : res.error); return; }
     LV.fails = 0; _lvNet(false);
@@ -10953,7 +10963,7 @@ function _lvPaintScorecard() {
     const open = _lvInnOpen(i.n); const x = i.extras;
     const head = `<button class="lv-inn" onclick="_lvToggleInn(${i.n})" aria-expanded="${open}"><span class="a">${open ? '▾' : '▸'}</span><span>${E(i.batting_team)}</span><span class="s">${i.runs}/${i.wickets} <small>(${i.overs} ov)</small></span></button>`;
     if(!open) return `<div class="lv-card">${head}</div>`;
-    const bat = i.batting.map(b => `<tr class="${b.batting ? 'cur' : ''}"><td class="nm">${E(b.name)}${b.strike ? ' *' : ''}<small>${b.out ? E(b.how) : (b.batting && i.status === 'in_progress' && d.match.status !== 'completed' ? 'batting' : 'not out')}</small></td><td class="big">${b.runs}</td><td>${b.balls}</td><td>${b.fours}</td><td>${b.sixes}</td><td>${b.balls ? b.sr.toFixed(1) : '–'}</td></tr>`).join('');
+    const bat = i.batting.map(b => `<tr class="${b.batting ? 'cur' : ''}"><td class="nm">${E(b.name)}${b.strike && i.status === 'in_progress' && d.match.status !== 'completed' ? ' *' : ''}<small>${b.out ? E(b.how) : (b.batting && i.status === 'in_progress' && d.match.status !== 'completed' ? 'batting' : 'not out')}</small></td><td class="big">${b.runs}</td><td>${b.balls}</td><td>${b.fours}</td><td>${b.sixes}</td><td>${b.balls ? b.sr.toFixed(1) : '–'}</td></tr>`).join('');
     const bowl = i.bowling.map(b => `<tr><td class="nm">${E(b.name)}${b.current && i.status === 'in_progress' ? ' *' : ''}</td><td>${b.overs}</td><td>${b.maidens}</td><td>${b.runs}</td><td class="${b.wickets ? 'w' : ''}">${b.wickets}</td><td>${b.noballs}</td><td>${b.wides}</td><td>${b.balls ? b.eco.toFixed(1) : '–'}</td></tr>`).join('');
     return `<div class="lv-card">${head}
       <table class="lv-tbl"><tr><th>Batter</th><th>R</th><th>B</th><th>4s</th><th>6s</th><th>SR</th></tr>${bat || '<tr><td colspan="6" class="nm">–</td></tr>'}</table>
