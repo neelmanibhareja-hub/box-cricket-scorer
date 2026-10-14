@@ -691,6 +691,7 @@ function _logVisit(page, param) {
 
 function route() {
   _closeSheets();
+  try { window.scrollTo({ top: 0, left: 0, behavior: 'instant' }); } catch(e) { window.scrollTo(0, 0); }
   stopAutoSync();
   stopLivePolling();
   stopLiveViewPolling();
@@ -948,9 +949,15 @@ function _matchWhen(m) {
   return day + ', ' + t;
 }
 
+// created but never started for over a day: list it with the old matches, not as upcoming
+function _matchNeverStarted(m) {
+  if (!m || m.status !== 'created' || !m.created_at) return false;
+  const t = Date.parse(String(m.created_at).replace(' ', 'T') + 'Z');
+  return isFinite(t) && Date.now() - t > 24 * 3600 * 1000;
+}
 function _matchCard(m) {
   const E = _escHtml, id = E(m.match_id);
-  const stale = _matchIsStale(m), live = m.status === 'live' && !stale, done = m.status === 'completed', fresh = m.status === 'created';
+  const stale = _matchIsStale(m), live = m.status === 'live' && !stale, done = m.status === 'completed', fresh = m.status === 'created', never = _matchNeverStarted(m);
   const mine = !!_scorerKey(m.match_id), admin = _isAdmin();
   const first = m.batting_first || (m.inn1 && m.inn1.batting_team) || m.team_a;
   const second = first === m.team_a ? m.team_b : m.team_a;
@@ -962,8 +969,9 @@ function _matchCard(m) {
   else if (live && m.inn2 && m.inn1) { const need = m.inn1.runs + 1 - m.inn2.runs, left = m.overs * 6 - m.inn2.balls; status = `<div class="mc-status live">${E(second)} need ${need} in ${left} ball${left === 1 ? '' : 's'}</div>`; }
   else if (live) status = '<div class="mc-status live">Innings in progress</div>';
   else if (stale) status = '<div class="mc-status">Not finished</div>';
+  else if (never) status = '<div class="mc-status">Never started</div>';
   else status = `<div class="mc-status">${m.batting_first ? E(first) + ' to bat first' : 'Toss yet to happen'}</div>`;
-  const badge = stale ? '<span class="mc-badge old">UNFINISHED</span>' : live ? '<span class="mc-badge live">● LIVE</span>' : done ? '<span class="mc-badge done">RESULT</span>' : '<span class="mc-badge soon">UPCOMING</span>';
+  const badge = never ? '<span class="mc-badge old">NOT STARTED</span>' : stale ? '<span class="mc-badge old">UNFINISHED</span>' : live ? '<span class="mc-badge live">● LIVE</span>' : done ? '<span class="mc-badge done">RESULT</span>' : '<span class="mc-badge soon">UPCOMING</span>';
   const open = done ? `navigate('summary/${id}')` : (fresh && (mine || admin)) ? (m.batting_first ? `navigate('openers/${id}')` : `navigate('toss/${id}')`) : `navigate('live/${id}')`;
   const label = (m.team_a + ' vs ' + m.team_b).replace(/\\/g, '').replace(/'/g, "\\'");
   const acts = [];
@@ -1020,8 +1028,8 @@ async function renderHome() {
   const ms = await _loadMatches();
   if (!_stillOn('home')) return;
   const live = ms.filter(m => m.status === 'live' && !_matchIsStale(m)).sort(_byNewest);
-  const soon = ms.filter(m => m.status === 'created').sort(_byNewest);
-  const recent = ms.filter(m => m.status === 'completed' || _matchIsStale(m)).sort(_byNewest);
+  const soon = ms.filter(m => m.status === 'created' && !_matchNeverStarted(m)).sort(_byNewest);
+  const recent = ms.filter(m => m.status === 'completed' || _matchIsStale(m) || _matchNeverStarted(m)).sort(_byNewest);
   const sec = (title, list, more) => list.length ? `<div class="h-sec"><h2>${title}</h2>${more || ''}</div><div style="display:flex;flex-direction:column;gap:10px">${list.map(_matchCard).join('')}</div>` : '';
   const admin = _isAdmin();
   app.innerHTML = _homeHeader('🏏 Box Cricket') + `
@@ -1052,10 +1060,11 @@ async function renderMatches() {
 function _setMatchesFilter(f) { _matchesFilter = f; _drawMatches(state.allMatches || []); }
 function _drawMatches(ms) {
   const f = _matchesFilter;
-  const pick = m => f === 'all' ? true : f === 'live' ? (m.status === 'live' && !_matchIsStale(m)) : f === 'soon' ? m.status === 'created' : (m.status === 'completed' || _matchIsStale(m));
-  const list = ms.filter(pick).sort(_byNewest);
+  const is = (k, m) => k === 'all' ? true : k === 'live' ? (m.status === 'live' && !_matchIsStale(m))
+    : k === 'soon' ? (m.status === 'created' && !_matchNeverStarted(m)) : (m.status === 'completed' || _matchIsStale(m) || _matchNeverStarted(m));
+  const list = ms.filter(m => is(f, m)).sort(_byNewest);
   const chip = (k, t, n) => `<button class="${f === k ? 'on' : ''}" onclick="_setMatchesFilter('${k}')">${t}${n ? ' · ' + n : ''}</button>`;
-  const count = k => ms.filter(m => (_matchesFilter = k, pick(m))).length; const counts = { all: ms.length, live: count('live'), soon: count('soon'), done: count('done') }; _matchesFilter = f;
+  const counts = { all: ms.length, live: ms.filter(m => is('live', m)).length, soon: ms.filter(m => is('soon', m)).length, done: ms.filter(m => is('done', m)).length };
   let lastDay = '', body = '';
   list.forEach(m => { const day = (_matchWhen(m).split(',')[0]) || ''; if (day !== lastDay) { body += `<div class="h-sec"><h2>${_escHtml(day)}</h2></div>`; lastDay = day; } body += `<div style="margin-bottom:10px">${_matchCard(m)}</div>`; });
   app.innerHTML = _homeHeader('Matches', true) + `
