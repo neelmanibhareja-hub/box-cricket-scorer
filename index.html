@@ -90,6 +90,8 @@ tailwind.config = {
 @keyframes vsCelebPop { 0% { opacity:0; transform:translate(-50%,-50%) scale(0.3); } 40% { opacity:1; transform:translate(-50%,-50%) scale(1.2); } 100% { opacity:0; transform:translate(-50%,-50%) scale(1.5) translateY(-30px); } }
 :root { --bg: #f1f5f9; --bg-card: #ffffff; --text: #0f172a; --text2: #64748b; --border: #e2e8f0; }
 .dark { --bg: #0f172a; --bg-card: #1e293b; --text: #f1f5f9; --text2: #94a3b8; --border: #334155; }
+button.text-2xl.leading-none, button[aria-label="Back"], button[onclick^="navigate('home')"]:not([class*="py-"]), button[onclick="history.back()"] { min-width: 44px; min-height: 44px; }
+span[onclick^="promptRenamePlayer"] { display: inline-block; padding: 6px 4px; margin: -6px -4px; }
 body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; }
 .card { background: var(--bg-card); border: 1px solid var(--border); }
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 50; display: flex; align-items: flex-end; justify-content: center; overflow-y: auto; }
@@ -305,10 +307,6 @@ function sanitizeName(name) {
   return (name||'').replace(/<[^>]*>/g,'').replace(/['"<>&]/g,'').trim().slice(0,30);
 }
 
-function safeStorage(key, value) {
-  try { localStorage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value)); return true; }
-  catch(e) { showToast('Storage full! Clear old matches.'); return false; }
-}
 
 const _offlineQueue = {
   dbName: 'cricket_offline', storeName: 'queue',
@@ -635,15 +633,6 @@ function _matchIsStale(m) {
   const t = Date.parse(m.created_at.replace(' ', 'T') + 'Z');   // server stores UTC "YYYY-MM-DD HH:MM"
   return isFinite(t) && Date.now() - t > 12 * 3600 * 1000;
 }
-function _matchWhen(m) {
-  if (!m || !m.created_at) return '';
-  const d = new Date(Date.parse(m.created_at.replace(' ', 'T') + 'Z'));
-  if (isNaN(d)) return '';
-  const today = new Date(); const y = new Date(Date.now() - 864e5);
-  if (d.toDateString() === today.toDateString()) return 'Today';
-  if (d.toDateString() === y.toDateString()) return 'Yesterday';
-  return d.getDate() + ' ' + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
-}
 // True while the user is still on this page — a slow load must not paint over a page they moved to.
 function _stillOn(page, id) {
   const r = getRoute();
@@ -701,6 +690,7 @@ function _logVisit(page, param) {
 }
 
 function route() {
+  _closeSheets();
   stopAutoSync();
   stopLivePolling();
   stopLiveViewPolling();
@@ -708,7 +698,7 @@ function route() {
   destroyVisualGame();
   const {page,params} = getRoute();
   const routes = {
-    home: renderHome, setup: renderSetup,
+    home: renderHome, matches: renderMatches, setup: renderSetup,
     'quick-setup': renderQuickSetup,
     'score-only': renderScoreOnly,
     'team-draft': renderTeamDraft,
@@ -726,7 +716,7 @@ function route() {
     highlights: renderHighlightsGallery
   };
   _showTabBar(!_HIDE_TAB_PAGES.includes(page));
-  const _tabMap = {home:'tab-home',players:'tab-players',summary:'tab-matches',scorecard:'tab-matches',timeline:'tab-matches',series:'tab-matches'};
+  const _tabMap = {home:'tab-home',matches:'tab-matches',players:'tab-players',summary:'tab-matches',scorecard:'tab-matches',timeline:'tab-matches',series:'tab-matches'};
   _setTab(_tabMap[page]||'tab-home');
   (routes[page]||renderHome)();
   _logVisit(page, params[0]||'');
@@ -910,224 +900,194 @@ async function renderHighlightsGallery() {
   }
 }
 
-async function renderHome() {
-  app.innerHTML = `<div class="flex-1 flex items-center justify-center flex-col gap-3"><div class="spin"></div><div class="text-sm" style="color:var(--text2)">Loading…</div></div>`;
+// ===== HOME + MATCHES =====
+// One match card used everywhere (it was drawn twice on the home screen, in two styles, with three
+// date formats). Buttons depend on who is looking: Score / Start only on the scorer's phone.
+const HOME_CSS = `
+.mc{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.mc-top{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:9px 12px 0;font-size:12px;color:var(--text2)}
+.mc-badge{font-size:11px;font-weight:800;padding:2px 8px;border-radius:999px;white-space:nowrap}
+.mc-badge.live{color:#dc2626;background:rgba(220,38,38,.1)}.mc-badge.done{color:var(--text2);background:var(--bg)}
+.mc-badge.soon{color:#b45309;background:rgba(245,158,11,.14)}.mc-badge.old{color:var(--text2);background:var(--bg)}
+.mc-body{padding:8px 12px 4px;cursor:pointer;touch-action:manipulation}
+.mc-row{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:3px 0}
+.mc-row .t{font-size:15px;font-weight:600;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mc-row .s{font-size:15px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;white-space:nowrap}
+.mc-row .s small{font-size:12px;font-weight:500;color:var(--text2)}
+.mc-row.on .t{font-weight:800}.mc-row.on .t:before{content:'';display:inline-block;width:7px;height:7px;border-radius:50%;background:#16a34a;margin-right:6px;vertical-align:middle}
+.mc-row .s.dim{color:var(--text2);font-weight:500}
+.mc-status{padding:2px 12px 8px;font-size:13px;font-weight:600;color:var(--text2)}
+.mc-status.live{color:#dc2626}.mc-status.done{color:#15803d}
+.mc-act{display:flex;gap:8px;padding:0 12px 11px;flex-wrap:wrap}
+.mc-act button{min-height:38px;padding:0 14px;border-radius:9px;font-size:13px;font-weight:700;border:1px solid var(--border);background:var(--bg-card);color:var(--text);cursor:pointer;touch-action:manipulation}
+.mc-act button.pri{background:#d0021b;border-color:#d0021b;color:#fff}.mc-act button.wa{color:#15803d}.mc-act button.warn{color:#b45309}.mc-act button.del{color:#dc2626}
+.mc-act .sp{flex:1}
+.h-sec{display:flex;align-items:baseline;justify-content:space-between;margin:14px 2px 6px}
+.h-sec h2{font-size:13px;font-weight:800;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin:0}
+.h-sec button{background:none;border:0;color:#d0021b;font-size:13px;font-weight:700;cursor:pointer;min-height:36px}
+.h-chips{display:flex;gap:8px;overflow-x:auto;padding:10px 12px 4px;scrollbar-width:none}
+.h-chips button{flex:none;min-height:36px;padding:0 14px;border-radius:18px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;font-weight:700;cursor:pointer}
+.h-chips button.on{background:#d0021b;border-color:#d0021b;color:#fff}
+.dark .mc-act button.wa,.dark .mc-status.done{color:#4ade80}.dark .mc-badge.soon{color:#fbbf24;background:rgba(251,191,36,.14)}
+.dark .mc-badge.live,.dark .mc-status.live{color:#f87171}.dark .h-sec button{color:#f87171}
+.h-empty{text-align:center;padding:36px 16px;color:var(--text2);font-size:14px}
+.h-btn{display:block;width:100%;min-height:44px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text);font-size:14px;font-weight:700;cursor:pointer}
+.h-start{display:block;width:100%;min-height:48px;margin-top:12px;border:0;border-radius:12px;background:#d0021b;color:#fff;font-size:15px;font-weight:800;cursor:pointer}
+`;
+function _homeCss() { if(!document.getElementById('home-css')) { const st = document.createElement('style'); st.id = 'home-css'; st.textContent = HOME_CSS; document.head.appendChild(st); } }
+
+// "Today, 7:17 pm" / "Yesterday, 6:05 pm" / "14 Oct, 7:17 pm" - the one date format used everywhere
+function _matchWhen(m) {
+  if (!m || !m.created_at) return '';
+  const d = new Date(Date.parse(String(m.created_at).replace(' ', 'T') + (String(m.created_at).length <= 16 ? 'Z' : '')));
+  if (isNaN(d)) return '';
+  const t = d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true }).replace(/\s?(am|pm)/i, (x, a) => ' ' + a.toLowerCase());
+  const today = new Date(); const y = new Date(Date.now() - 864e5);
+  const day = d.toDateString() === today.toDateString() ? 'Today' : d.toDateString() === y.toDateString() ? 'Yesterday'
+    : d.getDate() + ' ' + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()] + (d.getFullYear() !== today.getFullYear() ? ' ' + d.getFullYear() : '');
+  return day + ', ' + t;
+}
+
+function _matchCard(m) {
+  const E = _escHtml, id = E(m.match_id);
+  const stale = _matchIsStale(m), live = m.status === 'live' && !stale, done = m.status === 'completed', fresh = m.status === 'created';
+  const mine = !!_scorerKey(m.match_id), admin = _isAdmin();
+  const first = m.batting_first || (m.inn1 && m.inn1.batting_team) || m.team_a;
+  const second = first === m.team_a ? m.team_b : m.team_a;
+  const innOf = t => (m.inn1 && m.inn1.batting_team === t) ? m.inn1 : (m.inn2 && m.inn2.batting_team === t) ? m.inn2 : null;
+  const batting = m.inn2 ? second : m.inn1 ? first : '';
+  const row = t => { const i = innOf(t); return `<div class="mc-row${live && batting === t ? ' on' : ''}"><span class="t">${E(t)}</span>${i ? `<span class="s">${i.runs}/${i.wickets} <small>(${formatOvers(i.balls)})</small></span>` : `<span class="s dim">${done ? '' : 'yet to bat'}</span>`}</div>`; };
+  let status = '';
+  if (done) status = m.winner ? `<div class="mc-status done">${E(m.winner)} won</div>` : '<div class="mc-status">Match tied</div>';
+  else if (live && m.inn2 && m.inn1) { const need = m.inn1.runs + 1 - m.inn2.runs, left = m.overs * 6 - m.inn2.balls; status = `<div class="mc-status live">${E(second)} need ${need} in ${left} ball${left === 1 ? '' : 's'}</div>`; }
+  else if (live) status = '<div class="mc-status live">Innings in progress</div>';
+  else if (stale) status = '<div class="mc-status">Not finished</div>';
+  else status = `<div class="mc-status">${m.batting_first ? E(first) + ' to bat first' : 'Toss yet to happen'}</div>`;
+  const badge = stale ? '<span class="mc-badge old">UNFINISHED</span>' : live ? '<span class="mc-badge live">● LIVE</span>' : done ? '<span class="mc-badge done">RESULT</span>' : '<span class="mc-badge soon">UPCOMING</span>';
+  const open = done ? `navigate('summary/${id}')` : (fresh && (mine || admin)) ? (m.batting_first ? `navigate('openers/${id}')` : `navigate('toss/${id}')`) : `navigate('live/${id}')`;
+  const label = (m.team_a + ' vs ' + m.team_b).replace(/\\/g, '').replace(/'/g, "\\'");
+  const acts = [];
+  if ((live || stale) && (mine || admin)) acts.push(`<button class="pri" onclick="event.stopPropagation();navigate('scoring/${id}')">Score</button>`);
+  if (fresh && (mine || admin)) acts.push(`<button class="pri" onclick="event.stopPropagation();${open}">Start</button>`, `<button onclick="event.stopPropagation();editMatch('${id}')">Edit</button>`);
+  if (live || stale || (fresh && !mine && !admin)) acts.push(`<button${mine || admin ? '' : ' class="pri"'} onclick="event.stopPropagation();navigate('live/${id}')">Watch</button>`);
+  if (done) acts.push(`<button onclick="event.stopPropagation();navigate('scorecard/${id}')">Scorecard</button>`);
+  acts.push(`<button class="wa" onclick="event.stopPropagation();shareOnWhatsApp('${label}','','${id}')">Share</button>`);
+  if (admin) {
+    acts.push('<span class="sp"></span>');
+    if (live) acts.push(`<button class="warn" onclick="event.stopPropagation();showSetResultModal('${id}','${E(m.team_a).replace(/'/g, "\\'")}','${E(m.team_b).replace(/'/g, "\\'")}',${E(JSON.stringify(m.inn1 || null))})">Set result</button>`);
+    acts.push(`<button class="del" onclick="event.stopPropagation();deleteMatch('${id}','${label}')">Delete</button>`);
+  }
+  return `<div class="mc">
+    <div class="mc-top"><span>${E(m.overs)} over${Number(m.overs) === 1 ? '' : 's'} · ${E(_matchWhen(m))}${m.ground && m.ground.name ? ' · ' + E(m.ground.name) : ''}</span>${badge}</div>
+    <div class="mc-body" onclick="${open}">${row(first)}${row(second)}</div>
+    ${status}
+    <div class="mc-act">${acts.join('')}</div>
+  </div>`;
+}
+
+async function _loadMatches() {
   try {
     let res = await apiCall('list_matches');
-    if (res._needs_hydrate) {
-      app.innerHTML = `<div class="flex-1 flex items-center justify-center flex-col gap-3"><div class="spin"></div><div class="text-sm" style="color:var(--text2)">Restoring data…</div></div>`;
-      try {
-        await apiCall('hydrate');
-        res = await apiCall('list_matches');
-      } catch(e2) { /* ignore hydrate errors */ }
-    }
+    if (res._needs_hydrate) { try { await apiCall('hydrate'); res = await apiCall('list_matches'); } catch(e2) {} }
     state.allMatches = res.matches || [];
-  } catch(e) { state.allMatches = []; }
-
-  const ms = state.allMatches;
-  const allSeries = JSON.parse(localStorage.getItem('cricket_series')||'{}');
-  ms.forEach(m => {
-    if(!m.series_id) return;
-    let found = false;
-    for(const [sid, s] of Object.entries(allSeries)) {
-      if(sid === m.series_id || s.matches.includes(m.match_id)) {
-        if(!s.matches.includes(m.match_id)) s.matches.push(m.match_id);
-        found = true; break;
-      }
-    }
-    if(!found) {
-      if(!allSeries[m.series_id]) allSeries[m.series_id] = { teamA: m.team_a, teamB: m.team_b, matches: [m.match_id], closed: false, created: m.created_at };
-      else if(!allSeries[m.series_id].matches.includes(m.match_id)) allSeries[m.series_id].matches.push(m.match_id);
-    }
+  } catch(e) { state.allMatches = state.allMatches || []; }
+  // remember series this phone has seen (unchanged behaviour)
+  const allSeries = (() => { try { return JSON.parse(localStorage.getItem('cricket_series') || '{}'); } catch(e) { return {}; } })();
+  state.allMatches.forEach(m => {
+    if (!m.series_id) return;
+    const hit = Object.entries(allSeries).find(([sid, s]) => sid === m.series_id || (s.matches || []).includes(m.match_id));
+    if (hit) { if (!hit[1].matches.includes(m.match_id)) hit[1].matches.push(m.match_id); }
+    else allSeries[m.series_id] = { teamA: m.team_a, teamB: m.team_b, matches: [m.match_id], closed: false, created: m.created_at };
   });
-  localStorage.setItem('cricket_series', JSON.stringify(allSeries));
-
-  app.innerHTML = `
-    <div style="background:#d0021b;padding:0 16px;height:48px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;box-shadow:0 2px 8px rgba(208,2,27,0.3)">
-      <span style="color:#fff;font-weight:900;font-size:18px;letter-spacing:-0.3px;cursor:pointer" onclick="_adminTap()">🏏 Box Cricket</span>
-      <div style="display:flex;align-items:center;gap:8px">
-        ${(()=>{const p=_getUserProfile();return p?`<button onclick="showOnboarding()" style="background:rgba(255,255,255,0.15);border:none;color:#fff;font-size:12px;font-weight:700;padding:5px 10px;border-radius:20px;cursor:pointer;touch-action:manipulation;display:flex;align-items:center;gap:5px"><span style="font-size:16px">${p.avatar}</span>${p.name}</button>`:'';})()}
-        <button onclick="shareApp()" style="background:rgba(255,255,255,0.15);border:none;color:#fff;font-size:12px;font-weight:700;padding:5px 12px;border-radius:20px;cursor:pointer;touch-action:manipulation">📤 Share</button>
-        <button onclick="toggleTheme()" style="background:rgba(255,255,255,0.15);border:none;color:#fff;font-size:16px;width:34px;height:34px;border-radius:50%;cursor:pointer;touch-action:manipulation">🌙</button>
-      </div>
-    </div>
-    <div style="flex:1;overflow-y:auto;padding:12px;padding-bottom:calc(70px + env(safe-area-inset-bottom,0px));display:flex;flex-direction:column;gap:10px;background:var(--bg)">
-
-      <!-- Cricbuzz-style horizontal swipe strip -->
-      ${ms.length > 0 ? `
-      <div style="margin:-12px -12px 0;padding:14px 0 0;background:var(--bg-card);border-bottom:1px solid var(--border)">
-        <div style="padding:0 6px 10px">
-          <div class="cb-swipe-strip" id="cb-match-strip" onscroll="_cbStripScroll(this,${JSON.stringify(ms.length)})">
-            ${ms.map((m,mi)=>{
-              const isStale=_matchIsStale(m),isLive=m.status==='live'&&!isStale,isDone=m.status==='completed';
-              const nav=(m.status==='live')?`navigate('live/${m.match_id}')`:isDone?`navigate('summary/${m.match_id}')`:m.batting_first?`navigate('openers/${m.match_id}')`:`navigate('toss/${m.match_id}')`;
-              const i1=m.inn1,i2=m.inn2;
-              const batFirst=m.batting_first||(i1?.batting_team)||m.team_a;
-              const batSecond=batFirst===m.team_a?m.team_b:m.team_a;
-              const iA=batFirst===m.team_a?i1:i2;
-              const iB=batFirst===m.team_a?i2:i1;
-              const curBat=i2?batSecond:i1?batFirst:'';
-              const teamABat=isLive&&curBat===m.team_a,teamBBat=isLive&&curBat===m.team_b;
-              const s1=iA?iA.runs+'/'+iA.wickets:'–',s2=iB?iB.runs+'/'+iB.wickets:'–';
-              const ov1=iA?'('+formatOvers(iA.balls)+' ov)':'',ov2=iB?'('+formatOvers(iB.balls)+' ov)':'';
-              const need=i2&&i1?i1.runs+1-i2.runs:0,bl=i2?m.overs*6-i2.balls:0;
-              const statusLine=isDone&&m.winner?'<span style="color:#16a34a;font-weight:700">🏆 '+m.winner+' won</span>'
-                :isDone?'<span style="color:#888">Match Tied</span>'
-                :isLive&&i2?'<span style="color:#d0021b;font-weight:700">'+(i2.batting_team||m.team_b)+' need '+need+' off '+bl+' balls</span>'
-                :isLive?'<span style="color:#16a34a">Innings in progress</span>'
-                :isStale?'<span style="color:#888">Not finished · tap to open</span>'
-                :'<span style="color:#888">Tap to start</span>';
-              return '<div class="cb-swipe-card-outer"><div class="cb-swipe-card-inner" onclick="'+nav+'">'
-                +'<div style="background:#1a1a2e;padding:8px 14px;display:flex;justify-content:space-between;align-items:center">'
-                +'<span style="color:rgba(255,255,255,0.72);font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase">BOX CRICKET · '+m.overs+' OV'+(_matchWhen(m)?' · '+_matchWhen(m):'')+'</span>'
-                +(isStale?'<span style="background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.72);font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">UNFINISHED</span>'
-                  :isLive?'<span style="display:flex;align-items:center;gap:4px;color:#ff4444;font-size:11px;font-weight:700"><span style="width:6px;height:6px;border-radius:50%;background:#ff4444;animation:cb-pulse 1s infinite"></span>LIVE</span>'
-                  :isDone?'<span style="background:rgba(255,255,255,0.15);color:rgba(255,255,255,0.7);font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">RESULT</span>'
-                  :'<span style="background:rgba(255,255,255,0.15);color:#fbbf24;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">UPCOMING</span>')
-                +'</div>'
-                +'<div style="padding:12px 14px 8px">'
-                +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'
-                +'<div style="display:flex;align-items:center;gap:8px">'
-                +(teamABat?'<span style="width:8px;height:8px;border-radius:50%;background:#16a34a;flex-shrink:0"></span>':'<span style="width:8px;height:8px;flex-shrink:0"></span>')
-                +'<span style="font-size:16px;font-weight:'+(teamABat?'800':'600')+';color:var(--text)">'+m.team_a+'</span></div>'
-                +'<div style="text-align:right"><div style="font-size:18px;font-weight:800;color:var(--text)">'+s1+'</div><div style="font-size:11px;color:var(--text2)">'+ov1+'</div></div>'
-                +'</div>'
-                +'<div style="display:flex;justify-content:space-between;align-items:center">'
-                +'<div style="display:flex;align-items:center;gap:8px">'
-                +(teamBBat?'<span style="width:8px;height:8px;border-radius:50%;background:#16a34a;flex-shrink:0"></span>':'<span style="width:8px;height:8px;flex-shrink:0"></span>')
-                +'<span style="font-size:16px;font-weight:'+(teamBBat?'800':'600')+';color:var(--text)">'+m.team_b+'</span></div>'
-                +'<div style="text-align:right"><div style="font-size:18px;font-weight:'+(i2?'800':'400')+';color:'+(i2?'var(--text)':'var(--text2)')+'">'+s2+'</div><div style="font-size:11px;color:var(--text2)">'+ov2+'</div></div>'
-                +'</div>'
-                +'</div>'
-                +'<div style="padding:6px 14px 12px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">'
-                +'<div style="font-size:12px">'+statusLine+'</div>'
-                +(_isAdmin()?'<button onclick="event.stopPropagation();deleteMatch(\''+m.match_id+'\',\''+m.team_a.replace(/'/g,"\\'") + ' vs ' + m.team_b.replace(/'/g,"\\'")+'\')\" style="font-size:11px;font-weight:700;color:#ff6b6b;background:rgba(255,107,107,0.15);border:1px solid rgba(255,107,107,0.4);border-radius:8px;padding:3px 10px;touch-action:manipulation">🗑 Delete</button>':'')
-                +'</div>'
-                +'</div></div>';
-            }).join('')}
-          </div>
-        </div>
-        <div style="display:flex;justify-content:center;gap:5px;padding-bottom:12px" id="cb-strip-dots">
-          ${ms.map((_,i)=>'<div class="cb-swipe-dot'+(i===0?' active':'')+'" id="cb-dot-'+i+'"></div>').join('')}
-        </div>
-      </div>` : ''}
-
-      ${renderSeriesCards(ms)}
-      ${_isAdmin() && ms.some(m=>m.status==='live') ? `<button onclick="closeAllLiveMatches()" class="w-full py-2.5 rounded-xl text-sm font-bold active:scale-[0.97]" style="touch-action:manipulation;color:#f59e0b;border:1px solid #f59e0b;background:rgba(245,158,11,0.08)">⏹ End All Live Matches (${ms.filter(m=>m.status==='live').length} in progress)</button>` : ''}
-      ${_isAdmin() ? `<button onclick="showVisitorsPanel()" class="w-full py-2.5 rounded-xl text-sm font-bold active:scale-[0.97]" style="touch-action:manipulation;color:#a78bfa;border:1px solid rgba(167,139,250,0.4);background:rgba(167,139,250,0.08)">👥 View All Users</button>` : ''}
-      ${_isAdmin() ? `<button onclick="downloadVisitorsCSV()" class="w-full py-2.5 rounded-xl text-sm font-bold active:scale-[0.97]" style="touch-action:manipulation;color:#34d399;border:1px solid rgba(52,211,153,0.4);background:rgba(52,211,153,0.08)">📊 Download Visitors (Excel)</button>` : ''}
-      ${_isAdmin() && ms.length > 0 ? `<button onclick="deleteAllMatches()" class="w-full py-2.5 rounded-xl text-sm font-bold text-red-500 border border-red-400 active:scale-[0.97]" style="touch-action:manipulation">🗑 Delete All Matches (${ms.length})</button>` : ''}
-      ${ms.length===0?`<div class="text-center py-12" style="color:var(--text2)">
-        <div class="text-5xl mb-4">\u{1F3CF}</div>
-        <p class="text-lg font-medium">No matches yet</p>
-        <p class="text-sm mt-1">Create your first box cricket match!</p>
-      </div>`:''}
-      ${(()=>{
-        const order = {live:0,created:1,completed:2};
-        const sorted = [...ms].sort((a,b)=>{
-          const sd = (order[a.status]??9)-(order[b.status]??9);
-          if(sd!==0) return sd;
-          return (b.created_at||'').localeCompare(a.created_at||'');
-        });
-        let lastStatus=null;
-        return sorted.map(m=>{
-        const isLive = m.status==='live';
-        const isDone = m.status==='completed';
-        const isNew  = m.status==='created';
-        const sectionHeader = m.status!==lastStatus ? (()=>{
-          lastStatus=m.status;
-          const labels={live:'🔴 Live',created:'📅 Upcoming',completed:'✅ Completed'};
-          return `<div style="color:var(--text2);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.06em;padding:10px 2px 4px">${labels[m.status]||m.status}</div>`;
-        })() : '';
-        const batFirst=m.batting_first||(m.inn1?.batting_team)||m.team_a;
-        const batSecond=batFirst===m.team_a?m.team_b:m.team_a;
-        const innA = batFirst===m.team_a?m.inn1:m.inn2;
-        const innB = batFirst===m.team_a?m.inn2:m.inn1;
-        const inn1Str = innA ? innA.runs+'/'+innA.wickets+' ('+formatOvers(innA.balls)+')' : '\u2013';
-        const inn2Str = innB ? innB.runs+'/'+innB.wickets+' ('+formatOvers(innB.balls)+')' : '\u2013';
-        const _liveCurBat = m.inn2?batSecond:m.inn1?batFirst:'';
-        const teamABatting = isLive && _liveCurBat === m.team_a;
-        const teamBBatting = isLive && _liveCurBat === m.team_b;
-        const target = m.inn1 ? m.inn1.runs + 1 : 0;
-        const need = m.inn2 ? target - m.inn2.runs : 0;
-        const ballsLeft = m.inn2 ? (m.overs*6 - m.inn2.balls) : 0;
-        const inn2Team = m.inn2 ? batSecond : m.team_b;
-        const statusLine = isDone && m.winner
-          ? '<span style="color:#16a34a;font-weight:700">\u{1F3C6} '+m.winner+' won</span>'
-          : isDone ? '<span style="color:var(--text2)">Match Tied</span>'
-          : isLive && m.inn2
-            ? '<span style="color:#1d4ed8">'+inn2Team+' need '+need+' off '+ballsLeft+' balls</span>'
-            : '<span style="color:var(--text2)">'+m.overs+' overs'+(m.created_at ? ' \u2022 '+(m.created_at.split('T')[0]||m.created_at.split(' ')[0]) : '')+'</span>';
-        const mainClick = isLive ? `navigate('live/${m.match_id}')` : isDone ? `navigate('summary/${m.match_id}')` : m.batting_first ? `navigate('openers/${m.match_id}')` : `navigate('toss/${m.match_id}')`;
-        const scoreBtnLabel = isLive ? '\u25b6 Score' : isDone ? '\u{1F4CA} Summary' : '\u25b6 Start';
-        return `
-        <div style="background:#fff;border:1px solid #e8e8e8;border-radius:12px;overflow:hidden;touch-action:manipulation;box-shadow:0 1px 4px rgba(0,0,0,0.06)">
-          <div class="flex justify-between items-center px-3 pt-2.5 pb-1">
-            <span style="color:#888;font-size:10px;font-weight:600;letter-spacing:.05em;text-transform:uppercase">BOX CRICKET \u00b7 ${m.overs} ov${m.ground?.name?' \u00b7 \ud83c\udfdf '+m.ground.name:''}${m.created_at?' \u00b7 '+(()=>{const s=m.created_at.replace('T',' ');const p=s.split(/[- :]/);const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];const day=parseInt(p[2]||0);const mon=months[parseInt(p[1]||1)-1]||'';const yr=String(p[0]||'').slice(2);const h=p[3]||'';const mi=p[4]||'';return day+' '+mon+' \''+yr+(h?' '+h+':'+mi:'');})():''}</span>
-            ${_matchIsStale(m) ? '<span style="background:#e5e7eb;color:#4b5563;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px">UNFINISHED</span>'
-              : isLive ? '<span style="display:flex;align-items:center;gap:4px;color:#dc2626;font-size:11px;font-weight:700"><span style="width:7px;height:7px;border-radius:50%;background:#dc2626;display:inline-block"></span>LIVE</span>'
-              : isDone ? '<span style="background:#e5e7eb;color:#6b7280;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px">RESULT</span>'
-              : '<span style="background:#fef3c7;color:#b45309;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px">UPCOMING</span>'}
-          </div>
-          <div style="border-top:1px solid #f0f0f0;margin:0 12px"></div>
-          <div onclick="${mainClick}" style="cursor:pointer;padding:8px 12px 4px">
-            <div class="flex justify-between items-center" style="margin-bottom:4px">
-              <span style="font-size:15px;font-weight:${teamABatting?700:600};color:#1a1a1a;display:flex;align-items:center;gap:5px">
-                ${teamABatting ? '<span style="color:#16a34a;font-size:10px">\u25cf</span>' : ''}
-                ${m.team_a}
-              </span>
-              <span style="font-size:14px;font-weight:${m.inn1?700:400};color:${m.inn1?'#1a1a1a':'#999'}">${inn1Str}</span>
-            </div>
-            <div class="flex justify-between items-center">
-              <span style="font-size:15px;font-weight:${teamBBatting?700:600};color:#1a1a1a;display:flex;align-items:center;gap:5px">
-                ${teamBBatting ? '<span style="color:#16a34a;font-size:10px">\u25cf</span>' : ''}
-                ${m.team_b}
-              </span>
-              <span style="font-size:14px;font-weight:${m.inn2?700:400};color:${m.inn2?'#1a1a1a':'#999'}">${inn2Str}</span>
-            </div>
-          </div>
-          <div style="border-top:1px solid #f0f0f0;margin:6px 12px 0"></div>
-          <div style="padding:5px 12px 6px;font-size:12px;display:flex;justify-content:space-between;align-items:center">
-            <span>${statusLine}</span>
-            ${m.created_at?`<span style="font-size:11px;color:#aaa;font-weight:500">${(()=>{const s=m.created_at.replace('T',' ');const p=s.split(/[- :]/);const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];const day=parseInt(p[2]||0);const mon=months[parseInt(p[1]||1)-1]||'';const h=(p[3]||'').padStart(2,'0');const mi=(p[4]||'').padStart(2,'0');return '📅 '+day+' '+mon+(h&&mi?' · '+h+':'+mi:'');})()}</span>`:''}
-          </div>
-          <div style="border-top:1px solid #f0f0f0;margin:0 12px"></div>
-          <div class="flex items-center gap-2 px-3 py-2">
-            ${true?`<button onclick="event.stopPropagation();shareOnWhatsApp('${m.team_a.replace(/'/g,"\\'")} vs ${m.team_b.replace(/'/g,"\\'")}','','${m.match_id}')"
-              class="text-xs px-3 py-1.5 rounded-lg active:scale-95 font-bold text-white" style="background:#25D366;touch-action:manipulation">
-              \u{1F4AC} Share
-            </button>`:''}
-            ${isNew?`<button onclick="event.stopPropagation();editMatch('${m.match_id}')"
-              class="text-xs px-3 py-1.5 rounded-lg active:scale-95 font-bold" style="color:#3b82f6;touch-action:manipulation">
-              \u270F Edit
-            </button>`:''}
-            ${_isAdmin() && isLive ?`<button onclick="event.stopPropagation();showSetResultModal('${m.match_id}','${m.team_a.replace(/'/g,"\\'")}','${m.team_b.replace(/'/g,"\\'")}',${JSON.stringify(m.inn1||null)})"
-              class="text-xs px-3 py-1.5 rounded-lg active:scale-95 font-bold" style="color:#f59e0b;border:1px solid #f59e0b;touch-action:manipulation">
-              ✏️ Set Result
-            </button>`:''}
-            ${_isAdmin()?`<button onclick="event.stopPropagation();deleteMatch('${m.match_id}','${m.team_a.replace(/'/g,"\\'") + ' vs ' + m.team_b.replace(/'/g,"\\'")}')"
-              class="text-xs px-3 py-1.5 rounded-lg active:scale-95 font-bold" style="color:#ef4444;border:1px solid #ef4444;touch-action:manipulation">
-              🗑 Delete
-            </button>`:''}
-            <button onclick="event.stopPropagation();${mainClick}"
-              class="text-xs px-3 py-1.5 rounded-lg active:scale-95 font-bold text-white ml-auto" style="background:var(--accent);touch-action:manipulation">
-              ${scoreBtnLabel}
-            </button>
-          </div>
-          ${isLive ? `<div style="padding:0 12px 10px">
-            <button onclick="event.stopPropagation();openLiveWatch('${m.match_id}')" style="width:100%;padding:9px;border-radius:8px;border:none;font-weight:700;font-size:13px;color:#fff;background:linear-gradient(135deg,#dc2626,#991b1b);animation:livepulse 1.5s ease-in-out infinite;touch-action:manipulation;cursor:pointer">
-              ● Watch Live
-            </button>
-          </div>` : ''}
-        </div>`;
-        return sectionHeader + card;
-      }).join('');
-      })()}
-    </div>
-    ${renderBettingLedger()}
-    <div style="height:16px"></div>
-  `;
+  try { localStorage.setItem('cricket_series', JSON.stringify(allSeries)); } catch(e) {}
+  return state.allMatches;
 }
+const _byNewest = (a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''));
+
+function _homeHeader(title, back) {
+  const p = _getUserProfile();
+  return `<div style="background:#d0021b;padding:0 12px;height:52px;display:flex;align-items:center;gap:8px;position:sticky;top:0;z-index:50">
+    ${back ? `<button onclick="navigate('home')" aria-label="Back" style="background:none;border:0;color:#fff;font-size:22px;min-width:40px;min-height:40px;cursor:pointer">←</button>` : ''}
+    <span style="flex:1;color:#fff;font-weight:900;font-size:18px;cursor:pointer" ${back ? '' : 'onclick="_adminTap()"'}>${title}</span>
+    ${p && !back ? `<button onclick="showOnboarding()" style="background:rgba(255,255,255,.16);border:0;color:#fff;font-size:12px;font-weight:700;min-height:36px;padding:0 10px;border-radius:18px;cursor:pointer">${_escHtml(p.avatar || '')} ${_escHtml(p.name || '')}</button>` : ''}
+    ${back ? '' : `<button onclick="shareApp()" style="background:rgba(255,255,255,.16);border:0;color:#fff;font-size:12px;font-weight:700;min-height:36px;padding:0 12px;border-radius:18px;cursor:pointer">Share app</button>`}
+  </div>`;
+}
+
+async function renderHome() {
+  _homeCss();
+  app.innerHTML = _homeHeader('🏏 Box Cricket') + '<div class="flex-1 flex items-center justify-center flex-col gap-3" style="padding:40px"><div class="spin"></div></div>';
+  const ms = await _loadMatches();
+  if (!_stillOn('home')) return;
+  const live = ms.filter(m => m.status === 'live' && !_matchIsStale(m)).sort(_byNewest);
+  const soon = ms.filter(m => m.status === 'created').sort(_byNewest);
+  const recent = ms.filter(m => m.status === 'completed' || _matchIsStale(m)).sort(_byNewest);
+  const sec = (title, list, more) => list.length ? `<div class="h-sec"><h2>${title}</h2>${more || ''}</div><div style="display:flex;flex-direction:column;gap:10px">${list.map(_matchCard).join('')}</div>` : '';
+  const admin = _isAdmin();
+  app.innerHTML = _homeHeader('🏏 Box Cricket') + `
+    <div style="flex:1;padding:4px 12px calc(76px + env(safe-area-inset-bottom,0px));background:var(--bg)">
+      ${ms.length ? '' : `<div class="h-empty"><div style="font-size:44px;margin-bottom:10px">🏏</div><div style="font-size:16px;font-weight:700;color:var(--text)">No matches yet</div><div style="margin-top:4px">Tap + to start your first box cricket match.</div><button class="h-start" onclick="openStartSheet()">Start a match</button></div>`}
+      ${sec('Live now', live)}
+      ${sec('Upcoming', soon)}
+      ${sec('Recent results', recent.slice(0, 5), recent.length > 5 ? `<button onclick="navigate('matches')">See all ${recent.length} →</button>` : '')}
+      ${renderSeriesCards(ms)}
+      ${admin ? `<div class="h-sec"><h2>Admin</h2></div><div style="display:flex;flex-direction:column;gap:8px">
+        ${live.length ? `<button onclick="closeAllLiveMatches()" class="h-btn" style="color:#b45309">End all live matches (${live.length})</button>` : ''}
+        <button onclick="showVisitorsPanel()" class="h-btn">View all users</button>
+        <button onclick="downloadVisitorsCSV()" class="h-btn">Download visitors (Excel)</button>
+        ${ms.length ? `<button onclick="deleteAllMatches()" class="h-btn" style="color:#dc2626">Delete all matches (${ms.length})</button>` : ''}
+      </div>` : ''}
+      ${renderBettingLedger()}
+    </div>`;
+}
+
+let _matchesFilter = 'all';
+async function renderMatches() {
+  _homeCss();
+  app.innerHTML = _homeHeader('Matches', true) + '<div class="flex-1 flex items-center justify-center" style="padding:40px"><div class="spin"></div></div>';
+  const ms = await _loadMatches();
+  if (!_stillOn('matches')) return;
+  _drawMatches(ms);
+}
+function _setMatchesFilter(f) { _matchesFilter = f; _drawMatches(state.allMatches || []); }
+function _drawMatches(ms) {
+  const f = _matchesFilter;
+  const pick = m => f === 'all' ? true : f === 'live' ? (m.status === 'live' && !_matchIsStale(m)) : f === 'soon' ? m.status === 'created' : (m.status === 'completed' || _matchIsStale(m));
+  const list = ms.filter(pick).sort(_byNewest);
+  const chip = (k, t, n) => `<button class="${f === k ? 'on' : ''}" onclick="_setMatchesFilter('${k}')">${t}${n ? ' · ' + n : ''}</button>`;
+  const count = k => ms.filter(m => (_matchesFilter = k, pick(m))).length; const counts = { all: ms.length, live: count('live'), soon: count('soon'), done: count('done') }; _matchesFilter = f;
+  let lastDay = '', body = '';
+  list.forEach(m => { const day = (_matchWhen(m).split(',')[0]) || ''; if (day !== lastDay) { body += `<div class="h-sec"><h2>${_escHtml(day)}</h2></div>`; lastDay = day; } body += `<div style="margin-bottom:10px">${_matchCard(m)}</div>`; });
+  app.innerHTML = _homeHeader('Matches', true) + `
+    <div class="h-chips">${chip('all', 'All', counts.all)}${chip('live', 'Live', counts.live)}${chip('soon', 'Upcoming', counts.soon)}${chip('done', 'Results', counts.done)}</div>
+    <div style="flex:1;padding:0 12px calc(76px + env(safe-area-inset-bottom,0px))">${body || '<div class="h-empty">Nothing here yet.</div>'}</div>`;
+}
+
+// "+" : every way to start a match, in one place
+function openStartSheet() {
+  _closeSheets();
+  const item = (icon, title, sub, go, rec) => `<button onclick="_closeSheets();${go}" style="display:flex;align-items:center;gap:14px;width:100%;min-height:62px;padding:10px 16px;border:0;background:none;text-align:left;cursor:pointer;color:var(--text)">
+      <span style="width:40px;height:40px;border-radius:12px;background:var(--bg);display:flex;align-items:center;justify-content:center;font-size:20px;flex:none">${icon}</span>
+      <span style="flex:1"><span style="display:block;font-size:15px;font-weight:800">${title}${rec ? ' <span style="font-size:11px;font-weight:800;color:#15803d;background:rgba(21,128,61,.12);padding:2px 7px;border-radius:9px;margin-left:4px">Recommended</span>' : ''}</span><span style="display:block;font-size:12.5px;color:var(--text2);margin-top:2px">${sub}</span></span></button>`;
+  const el = document.createElement('div'); el.id = 'cb-start-sheet';
+  el.style.cssText = 'position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.5);display:flex;align-items:flex-end';
+  el.onclick = e => { if (e.target === el) _closeSheets(); };
+  el.innerHTML = `<div style="width:100%;max-width:520px;margin:0 auto;background:var(--bg-card);border-radius:18px 18px 0 0;padding:8px 0 calc(12px + env(safe-area-inset-bottom,0px))">
+    <div style="width:40px;height:4px;border-radius:2px;background:var(--border);margin:6px auto 10px"></div>
+    <div style="padding:0 16px 6px;font-size:17px;font-weight:900;color:var(--text)">Start a match</div>
+    ${item('⚡', 'Quick match', 'Team names and overs — add players as you go', "navigate('quick-setup')", true)}
+    ${item('📋', 'Full setup', 'Squads, rules, common player', "navigate('setup')")}
+    ${item('🏆', 'Series', 'Pick captains, draft teams, play several matches', "navigate('team-draft')")}
+    ${item('🎯', 'Score only', 'Just runs and wickets, no player names', "navigate('score-only')")}
+    ${item('🪙', 'Toss a coin', 'Heads or tails before you start', "navigate('toss-only')")}
+  </div>`;
+  document.body.appendChild(el);
+}
+function _closeSheets() {
+  const s = document.getElementById('cb-start-sheet'); if (s) s.remove();
+  const m = document.getElementById('cb-more-sheet'); if (m) m.style.display = 'none';
+}
+
 
 let _adminTapCount = 0;
 let _adminTapTimer = null;
@@ -1332,22 +1292,32 @@ function deleteSavedTeam(name) {
 function loadTeamInto(side) {
   const teams = getSavedTeams();
   if(teams.length === 0) { alert('No saved teams yet. Teams are saved automatically when you create a match.'); return; }
+  // The picker's markup used to live only inside the scoring screen, so on the setup page this crashed.
+  if(!document.getElementById('modal-team-picker')) {
+    const m = document.createElement('div'); m.id = 'modal-team-picker'; m.className = 'modal-overlay'; m.style.display = 'none';
+    m.innerHTML = `<div class="modal-content"><div class="flex justify-between items-center mb-3"><h3 class="font-bold text-lg">Load <span id="team-picker-side">Team</span></h3>
+      <button onclick="hideModal('modal-team-picker')" aria-label="Close" class="text-2xl leading-none" style="min-width:44px;min-height:44px">&times;</button></div>
+      <div id="team-picker-list" class="max-h-80 overflow-y-auto"></div></div>`;
+    document.body.appendChild(m);
+  }
   const el = document.getElementById('team-picker-list');
-  el.innerHTML = teams.map(t =>
+  el.innerHTML = teams.map((t, i) =>
     `<div class="flex items-center justify-between p-3 rounded-lg mb-1 active:scale-95" style="background:var(--bg);touch-action:manipulation">
-      <button onclick="applyTeam('${side}',${JSON.stringify(JSON.stringify(t))})" class="flex-1 text-left">
-        <div class="font-medium">${t.name}</div>
-        <div class="text-xs" style="color:var(--text2)">${t.players.join(', ')}</div>
+      <button onclick="applyTeamAt('${side}',${i})" class="flex-1 text-left" style="min-height:44px">
+        <div class="font-medium">${_escHtml(t.name)}</div>
+        <div class="text-xs" style="color:var(--text2)">${t.players.map(_escHtml).join(', ')}</div>
       </button>
-      <button onclick="event.stopPropagation();confirmDeleteTeam('${t.name.replace(/'/g,"\\'")}','${side}')" class="text-red-400 text-xs px-2 ml-2">\u2716</button>
+      <button onclick="event.stopPropagation();confirmDeleteTeam('${_escHtml(t.name).replace(/'/g,"\\'")}','${side}')" aria-label="Delete saved team" class="text-red-400 text-xs px-2 ml-2" style="min-width:44px;min-height:44px">\u2716</button>
     </div>`
   ).join('');
   document.getElementById('team-picker-side').textContent = side === 'A' ? 'Team A' : 'Team B';
   document.getElementById('modal-team-picker').style.display = 'flex';
   window._teamPickerSide = side;
 }
-function applyTeam(side, teamJson) {
-  const t = JSON.parse(teamJson);
+// (the old button put the team's JSON inside a double-quoted onclick attribute, which cut it short: picking never worked)
+function applyTeamAt(side, i) { const t = getSavedTeams()[i]; if (t) applyTeam(side, t); }
+function applyTeam(side, team) {
+  const t = typeof team === 'string' ? JSON.parse(team) : team;
   document.getElementById('inp-team'+side).value = t.name;
   document.getElementById('inp-ppt').value = Math.max(4, Math.min(11, t.players.length));
   updatePlayerInputs();
@@ -3275,9 +3245,10 @@ function _scoreSig(o) {
 }
 
 async function renderScoring(matchId) {
-  const _acc = localStorage.getItem('cricket_access_' + matchId);
-  if (_isAdmin()) localStorage.setItem('cricket_access_' + matchId, 'full');
-  if (_acc !== 'full' && !_isAdmin()) { navigate('live/' + matchId); return; }
+  // The scoring screen is only for the phone that holds this match's scorer key (or admin mode).
+  // An old "access" flag on its own is not enough: those were handed out too freely before.
+  if (!_scorerKey(matchId) && !_isAdmin()) { try { localStorage.removeItem('cricket_access_' + matchId); } catch(e) {} navigate('live/' + matchId); return; }
+  localStorage.setItem('cricket_access_' + matchId, 'full');
   state.matchId = matchId;
   app.innerHTML = `<div class="flex-1 flex items-center justify-center flex-col gap-3"><div class="spin"></div><div class="text-sm" style="color:var(--text2)">Loading match…</div></div>`;
   const bounceToOpenersIfNeeded = async () => {
@@ -3455,7 +3426,7 @@ function _drawScoringInner() {
     <!-- Batsmen + Bowler (hidden when field active) -->
     <div class="card mx-2 mt-1.5 rounded-xl px-3 py-2 text-sm" style="${fieldActive?'display:none':''}">
       <div class="flex justify-end -mb-1 no-print">
-        <button onclick="showRetireModal()" class="text-xs px-2 py-0.5 rounded-md active:scale-95" style="background:var(--bg);color:var(--text2);border:1px solid var(--border);touch-action:manipulation">\u21BB Sub</button>
+        <button onclick="showRetireModal()" class="text-xs px-3 rounded-md active:scale-95" style="min-height:34px;background:var(--bg);color:var(--text2);border:1px solid var(--border);touch-action:manipulation">\u21BB Sub</button>
       </div>
       <div class="flex justify-between items-center">
         <div class="flex items-center gap-1.5">
@@ -3646,16 +3617,6 @@ function _drawScoringInner() {
       <p class="text-sm" id="end-inn-confirm-msg" style="color:var(--text2)"></p>
       <button id="end-inn-confirm-btn" class="w-full py-4 rounded-xl font-bold text-white text-lg active:scale-95" style="background:#dc2626;touch-action:manipulation">End Innings</button>
       <button onclick="hideModal('modal-end-inn-confirm')" class="w-full py-3 rounded-xl text-sm font-medium active:scale-95" style="color:var(--text2);touch-action:manipulation">Cancel</button>
-    </div>
-  </div>
-
-  <div id="modal-team-picker" class="modal-overlay" style="display:none">
-    <div class="modal-content">
-      <div class="flex justify-between items-center mb-3">
-        <h3 class="font-bold text-lg">Load <span id="team-picker-side">Team</span></h3>
-        <button onclick="hideModal('modal-team-picker')" class="text-2xl leading-none">&times;</button>
-      </div>
-      <div id="team-picker-list" class="max-h-80 overflow-y-auto"></div>
     </div>
   </div>`;
 
@@ -4460,39 +4421,6 @@ function showVisualHelpModal() {
   modal.style.display = 'flex';
 }
 
-function vsGameStep2(disabled, bowlType) {
-  const typeLabel = {fast:'\u{1F4A8} Fast',medium:'\u{1F3AF} Medium',spin:'\u{1F300} Spin',yorker:'\u2B07\uFE0F Yorker',bouncer:'\u2B06\uFE0F Bouncer',slower:'\u{1F422} Slower'}[bowlType]||bowlType;
-
-  const zones = [
-    {key:'short',label:'SHORT',color:'#ef4444',desc:'Bouncing high'},
-    {key:'good_length',label:'GOOD LENGTH',color:'#f59e0b',desc:'On the spot'},
-    {key:'full',label:'FULL',color:'#3b82f6',desc:'Driving length'},
-    {key:'yorker_length',label:'YORKER',color:'#8b5cf6',desc:'At the toes'}
-  ];
-
-  return '<div style="text-align:center;margin-bottom:8px">' +
-    '<span style="display:inline-block;padding:4px 12px;border-radius:20px;background:#1e3a5f;color:#3b82f6;font-size:11px;font-weight:700">' + typeLabel + '</span>' +
-    '<div style="color:#64748b;font-size:11px;font-weight:800;letter-spacing:2px;margin-top:6px">WHERE DID IT PITCH?</div>' +
-  '</div>' +
-  '<div style="position:relative;width:120px;margin:0 auto;background:linear-gradient(180deg,#166534 0%,#c4a35a44 15%,#c4a35a55 85%,#166534 100%);border-radius:10px;border:2px solid #22c55e33;padding:8px 0">' +
-    '<div style="text-align:center;font-size:8px;margin-bottom:4px">\u{26BE}</div>' +
-    zones.map((z,i) =>
-      '<button onclick="state._vsPitchZone=\'' + z.key + '\';state._vsStep=3;drawScoring()" ' +
-      'style="display:block;width:85%;margin:4px auto;padding:12px 8px;border-radius:8px;border:1.5px solid ' + z.color + '55;' +
-      'background:' + z.color + '20;color:' + z.color + ';font-size:10px;font-weight:800;letter-spacing:1px;' +
-      'cursor:pointer;touch-action:manipulation;text-align:center;animation:vsCardIn 0.2s ease-out ' + (i*0.06) + 's both">' +
-      z.label + '</button>'
-    ).join('') +
-    '<div style="text-align:center;font-size:14px;margin-top:4px">\u{1F3CF}</div>' +
-  '</div>' +
-  '<div style="display:flex;gap:8px;justify-content:center;margin-top:10px">' +
-    '<button onclick="state._vsPitchZone=\'wide_off\';state._vsStep=3;drawScoring()" style="padding:8px 14px;border-radius:8px;background:#1e293b;border:1px solid #334155;color:#94a3b8;font-size:11px;font-weight:700;cursor:pointer;touch-action:manipulation">WIDE OFF</button>' +
-    '<button onclick="state._vsPitchZone=\'wide_leg\';state._vsStep=3;drawScoring()" style="padding:8px 14px;border-radius:8px;background:#1e293b;border:1px solid #334155;color:#94a3b8;font-size:11px;font-weight:700;cursor:pointer;touch-action:manipulation">WIDE LEG</button>' +
-  '</div>' +
-  '<div style="text-align:center;margin-top:8px">' +
-    '<button onclick="state._vsStep=1;drawScoring()" style="padding:6px 16px;border-radius:8px;background:#1e293b;border:1px solid #334155;color:#475569;font-size:11px;font-weight:600;cursor:pointer;touch-action:manipulation">\u2190 Back</button>' +
-  '</div>';
-}
 
 function vsGameStep3Field(disabled, bowlType) {
   requestAnimationFrame(() => initBoxGround());
@@ -4513,61 +4441,7 @@ function vsGameStep3Buttons(disabled) {
   '</div>';
 }
 
-function initWagonCanvas() {
-  const canvas = document.getElementById('wwCanvas');
-  if (!canvas || canvas._init) return;
-  canvas._init = true;
-  const ctx = canvas.getContext('2d');
-  const W = 500, H = 500, cx = W/2, cy = H/2, R = W/2 - 30;
-  let swiping = false, swAngle = 0, swDist = 0;
 
-  function draw(sd) {
-    ctx.clearRect(0, 0, W, H);
-    const fg = ctx.createRadialGradient(cx,cy,0,cx,cy,R+15);
-    fg.addColorStop(0,'#2d8a4e'); fg.addColorStop(0.5,'#1f6b38'); fg.addColorStop(0.85,'#166534'); fg.addColorStop(1,'#0a1628');
-    ctx.fillStyle = fg; ctx.beginPath(); ctx.arc(cx,cy,R+10,0,Math.PI*2); ctx.fill();
-    for(let i=0;i<24;i++){const a1=i*15*Math.PI/180,a2=(i*15+15)*Math.PI/180;ctx.fillStyle=i%2?'rgba(0,0,0,0.03)':'rgba(255,255,255,0.03)';ctx.beginPath();ctx.moveTo(cx,cy);ctx.arc(cx,cy,R+10,a1,a2);ctx.closePath();ctx.fill();}
-    ctx.strokeStyle='rgba(255,255,255,0.15)';ctx.lineWidth=1.5;ctx.setLineDash([6,4]);ctx.beginPath();ctx.arc(cx,cy,R*0.55,0,Math.PI*2);ctx.stroke();
-    ctx.lineWidth=2;ctx.beginPath();ctx.arc(cx,cy,R,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
-    [{t:'Straight',a:-90},{t:'Cover',a:-30},{t:'Point',a:5},{t:'Cut',a:35},{t:'3rd Man',a:75},{t:'Fine Leg',a:105},{t:'Sq Leg',a:185},{t:'Pull',a:210},{t:'On Drive',a:-125}].forEach(l=>{
-      const rd=l.a*Math.PI/180;ctx.strokeStyle='rgba(255,255,255,0.06)';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+Math.cos(rd)*(R+5),cy+Math.sin(rd)*(R+5));ctx.stroke();
-      ctx.font='bold 16px Arial';ctx.fillStyle='rgba(255,255,255,0.35)';ctx.textAlign='center';ctx.fillText(l.t,cx+Math.cos(rd)*R*0.78,cy+Math.sin(rd)*R*0.78);
-    });
-    ctx.font='bold 13px Arial';ctx.fillStyle='rgba(255,255,255,0.2)';ctx.fillText('OFF SIDE',cx+R*0.45,cy-R+12);ctx.fillText('LEG SIDE',cx-R*0.45,cy-R+12);
-    ctx.fillStyle='rgba(196,163,90,0.4)';ctx.fillRect(cx-5,cy-20,10,40);
-    (state.wagonWheelBalls||[]).forEach(b=>{if(b.shotAngle==null)return;const rd=(b.shotAngle-90)*Math.PI/180;const len=(b.shotDistance||0.3)*R*0.85;const ex=cx+Math.cos(rd)*len,ey=cy+Math.sin(rd)*len;const col=b.runs>=6?'#22c55e':b.runs>=4?'#f59e0b':b.runs>=2?'#3b82f6':'#64748b';ctx.globalAlpha=0.35;ctx.strokeStyle=col;ctx.lineWidth=2.5;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(ex,ey);ctx.stroke();ctx.fillStyle=col;ctx.beginPath();ctx.arc(ex,ey,4,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;});
-    ctx.fillStyle='rgba(255,255,255,0.9)';ctx.beginPath();ctx.arc(cx,cy,16,0,Math.PI*2);ctx.fill();ctx.font='16px Arial';ctx.fillStyle='#000';ctx.textAlign='center';ctx.fillText('\u{1F3CF}',cx,cy+5);
-    if(sd&&sd.dist>0.05){const rd=(sd.angle-90)*Math.PI/180;const len=sd.dist*R*0.95;const ex=cx+Math.cos(rd)*len,ey=cy+Math.sin(rd)*len;const runs=getRunsFromDistance(sd.dist);const col=runs>=6?'#22c55e':runs>=4?'#f59e0b':runs>=2?'#3b82f6':'#64748b';ctx.shadowColor=col;ctx.shadowBlur=12;ctx.strokeStyle=col;ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(ex,ey);ctx.stroke();ctx.shadowBlur=0;ctx.fillStyle=col;ctx.beginPath();ctx.arc(ex,ey,10,0,Math.PI*2);ctx.fill();ctx.fillStyle='#fff';ctx.font='bold 16px Arial';ctx.fillText(runs,ex,ey+5);
-      const info=document.getElementById('vs-shot-info');if(info){const shot=getShotTypeFromAngle(sd.angle);info.innerHTML='<span style="font-size:28px;font-weight:900;color:'+col+'">'+runs+'</span><div style="font-size:11px;font-weight:700;color:#94a3b8">'+shot.label+'</div>';}
-    }
-  }
-
-  function getP(e){const r=canvas.getBoundingClientRect();const sx=W/r.width,sy=H/r.height;const t=e.touches?e.touches[0]:e;return{x:(t.clientX-r.left)*sx,y:(t.clientY-r.top)*sy};}
-
-  function onDown(e){e.preventDefault();swiping=true;swDist=0;}
-  function onMove(e){if(!swiping)return;e.preventDefault();const p=getP(e);const dx=p.x-cx,dy=p.y-cy;swDist=Math.min(Math.sqrt(dx*dx+dy*dy)/R,1.1);let a=Math.atan2(dx,-dy)*(180/Math.PI);if(a<0)a+=360;swAngle=a;draw({angle:swAngle,dist:swDist});}
-  function onUp(){if(!swiping)return;swiping=false;if(swDist<0.08){draw(null);return;}
-    const runs=getRunsFromDistance(swDist);const shot=getShotTypeFromAngle(swAngle);
-    if(runs>=4){const ov=document.createElement('div');ov.style.cssText='position:fixed;inset:0;z-index:40;pointer-events:none;animation:vsFlash 0.4s ease-out forwards;background:'+(runs>=6?'rgba(34,197,94,0.3)':'rgba(245,158,11,0.3)');document.body.appendChild(ov);setTimeout(()=>ov.remove(),500);
-      const bt2=document.createElement('div');bt2.textContent=runs>=6?'SIX!':'FOUR!';bt2.style.cssText='position:fixed;top:40%;left:50%;transform:translate(-50%,-50%);z-index:45;pointer-events:none;font-size:56px;font-weight:900;color:#fff;text-shadow:0 4px 20px '+(runs>=6?'#22c55e':'#f59e0b')+';animation:vsCelebPop 0.6s ease-out forwards';document.body.appendChild(bt2);setTimeout(()=>bt2.remove(),700);}
-    const _bt=state._vsBowlType||'',_pz=state._vsPitchZone||'';state._vsStep=3;state._vsPitchZone='';
-    setTimeout(()=>{scoreBallVisual(runs,_bt,_pz,swAngle,swDist,shot.type);},runs>=4?500:150);
-  }
-
-  canvas.addEventListener('touchstart',onDown,{passive:false});canvas.addEventListener('touchmove',onMove,{passive:false});canvas.addEventListener('touchend',onUp);
-  canvas.addEventListener('mousedown',onDown);canvas.addEventListener('mousemove',(e)=>{if(swiping)onMove(e);});canvas.addEventListener('mouseup',onUp);canvas.addEventListener('mouseleave',()=>{if(swiping){swiping=false;draw(null);}});
-  draw(null);
-}
-
-function vsQuickScore(runs) {
-  const bowlType = state._vsBowlType || '';
-  const pitchZone = state._vsPitchZone || '';
-  state._vsStep = 3;
-  state._vsPitchZone = '';
-  state._vsShotAngle = null;
-  state._vsShotDist = 0;
-  scoreBallVisual(runs, bowlType, pitchZone, null, null, '');
-}
 
 async function scoreBallVisual(runs, bowlType, pitchZone, shotAngle, shotDistance, shotType) {
   if(!state.bowler) { setPendingRetry(() => scoreBallVisual(runs, bowlType, pitchZone, shotAngle, shotDistance, shotType)); showBowlerPicker(); return; }
@@ -4631,7 +4505,10 @@ function renderBowlCard() {
     </tr>`).join('')}</tbody></table>`;
 }
 
+// Only the match's scorer (or admin) may change it: the server enforces this, the page just stops offering it.
+function _canEditMatch(matchId) { return !!_scorerKey(matchId) || _isAdmin(); }
 async function promptRenamePlayer(oldName) {
+  if(!_canEditMatch(state.matchId)) return;
   const newName = prompt('Rename player "' + oldName + '" to:', oldName);
   if(!newName || newName.trim() === oldName) return;
   try {
@@ -5270,18 +5147,6 @@ function updateScoreStrip() {
   if(el('ss-bowler')) el('ss-bowler').textContent = '\u{26BE} ' + bw.name + ' ' + formatOvers(bw.balls) + '-' + bw.runs + '-' + bw.wickets;
 }
 
-function getScoreBarText() {
-  const s = state.score || {runs:0,wickets:0,balls:0};
-  const os = state.onStrike||{name:'-',runs:0,balls:0};
-  const ns = state.nonStriker||{name:'-',runs:0,balls:0};
-  const bw = state.bowler||{name:'-',balls:0,runs:0,wickets:0};
-  const totalOvers = state.match?.overs||5;
-  const crr = calcRR(s.runs, s.balls);
-  let line1 = (state.battingTeam||'') + '  ' + s.runs + '/' + s.wickets + '  (' + formatOvers(s.balls) + '/' + totalOvers + ' ov)   CRR:' + crr;
-  if(state.target) { const bl = totalOvers*6-s.balls; line1 += '  Need ' + Math.max(0,state.target-s.runs) + ' off ' + bl + 'b'; }
-  const line2 = os.name + '* ' + os.runs + '(' + os.balls + ')  ' + ns.name + ' ' + ns.runs + '(' + ns.balls + ')   ' + bw.name + ' ' + formatOvers(bw.balls) + '-' + bw.runs + '-' + bw.wickets;
-  return { line1, line2 };
-}
 
 function drawScoreBarOnCanvas(ctx, w, h) {
   const s   = state.score || {runs:0,wickets:0,balls:0};
@@ -5937,12 +5802,6 @@ function formatClipTime(sec) {
   });
 })()
 
-function prevClip() {
-  if(_currentClipIndex > 0) playClip(_currentClipIndex - 1);
-}
-function nextClip() {
-  if(_currentClipIndex < _recentClips.length - 1) playClip(_currentClipIndex + 1);
-}
 
 let _thirdUmpireActive = false;
 
@@ -6071,8 +5930,6 @@ function stopCamera() {
   document.getElementById('camera-container').style.display = 'none';
 }
 
-async function maybeRecord() {
-}
 
 // ===== LIVE STREAMING =====
 let _liveActive = false;
@@ -7711,7 +7568,7 @@ async function startSuperOver() {
       </div>
     </div>
     <div class="p-4 border-t no-print" style="border-color:var(--border)">
-      <button onclick="confirmSuperOver('${parentMatchId}', '${m.team_a}', '${m.team_b}', ${soNum})" id="btn-so-start"
+      <button onclick="confirmSuperOver('${parentMatchId}', '${m.team_a}', '${m.team_b}', ${soNum})" id="btn-sover-start"
         class="w-full py-4 rounded-xl bg-yellow-500 text-white font-bold text-lg active:scale-[0.97]"
         style="touch-action:manipulation">
         Start Super Over ⚡
@@ -7754,7 +7611,7 @@ async function confirmSuperOver(parentMatchId, teamA, teamB, soNum) {
   if(!bowlA) { alert('Pick a bowler for ' + teamA); return; }
   if(!bowlB) { alert('Pick a bowler for ' + teamB); return; }
 
-  const btn = document.getElementById('btn-so-start');
+  const btn = document.getElementById('btn-sover-start');
   btn.disabled = true; btn.textContent = 'Creating...';
 
   const batFirst = window._soFirstBat === 'A' ? teamA : teamB;
@@ -7902,7 +7759,7 @@ async function renderScorecard(matchId) {
             ${(inn.batting||[]).map((b,bi)=>`
             <tr style="border-bottom:1px solid #f0f0f0;background:${bi%2===0?'#fff':'#fafafa'}">
               <td style="padding:10px 16px;font-weight:700;color:#1a1a1a;white-space:nowrap">
-                <span onclick="promptRenamePlayer('${b.name.replace(/'/g,"\\'")}')" style="cursor:pointer">${b.name}</span>
+                ${_canEditMatch(matchId) ? `<span onclick="promptRenamePlayer('${b.name.replace(/'/g,"\\'")}')" style="cursor:pointer">${b.name}</span>` : b.name}
               </td>
               <td style="padding:10px 8px;color:#666;font-size:12px;max-width:120px">${b.how_out||'<span style="color:#1e7e34;font-weight:600">not out</span>'}</td>
               <td style="padding:10px 8px;font-weight:800;color:#1a1a1a;text-align:center">${b.runs}</td>
@@ -7939,7 +7796,7 @@ async function renderScorecard(matchId) {
             ${(inn.bowling||[]).map((b,bi)=>`
             <tr style="border-bottom:1px solid #f0f0f0;background:${bi%2===0?'#fff':'#fafafa'}">
               <td style="padding:10px 16px;font-weight:700;color:#1a1a1a;white-space:nowrap">
-                <span onclick="promptRenamePlayer('${b.name.replace(/'/g,"\\'")}')" style="cursor:pointer">${b.name}</span>
+                ${_canEditMatch(matchId) ? `<span onclick="promptRenamePlayer('${b.name.replace(/'/g,"\\'")}')" style="cursor:pointer">${b.name}</span>` : b.name}
               </td>
               <td style="padding:10px 8px;color:#666;text-align:center">${formatOvers(b.balls)}</td>
               <td style="padding:10px 8px;color:#1a1a1a;font-weight:600;text-align:center">${b.runs}</td>
@@ -8728,39 +8585,7 @@ function _showProVideoResultLocal(blobUrl, blob) {
   };
 }
 
-function _showProVideoResult(videoUrl) {
-  _proStatus('');
-  const resultEl = document.getElementById('pro-video-result');
-  const btn = document.getElementById('pro-video-btn');
-  if(btn) btn.style.display = 'none';
-  if(resultEl) {
-    resultEl.style.display = 'block';
-    resultEl.innerHTML = `
-      <video src="${videoUrl}" controls playsinline autoplay style="width:100%;border-radius:12px;margin-bottom:12px;max-height:240px;object-fit:cover"></video>
-      <div style="display:flex;gap:8px">
-        <button onclick="hlDownloadUrl('${videoUrl}','pro_highlights.mp4')"
-          style="flex:1;padding:13px;border-radius:10px;border:none;font-weight:800;font-size:13px;color:#fff;background:#16a34a;cursor:pointer;touch-action:manipulation">
-          ⬇️ Save to Phone
-        </button>
-        <button onclick="hlShareUrl('${videoUrl}')"
-          style="flex:1;padding:13px;border-radius:10px;border:none;font-weight:800;font-size:13px;color:#fff;background:#7c3aed;cursor:pointer;touch-action:manipulation">
-          📤 Share
-        </button>
-      </div>`;
-  }
-}
 
-async function hlDownloadUrl(url, filename) {
-  try {
-    const resp = await fetch(url);
-    const blob = await resp.blob();
-    const file = new File([blob], filename || 'highlights.mp4', { type: 'video/mp4' });
-    if(navigator.share) { try { await navigator.share({ files: [file] }); return; } catch(e) { if(e.name==='AbortError') return; } }
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(file); a.download = filename || 'highlights.mp4';
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  } catch(e) { window.open(url, '_blank'); showToast('Long-press video → Save'); }
-}
 
 async function hlShareUrl(url) {
   try {
@@ -10103,19 +9928,6 @@ function settleMatchWinnerBets(winner) {
   if (settled) { saveWallets(wallets); saveMarket(state.matchId, market); }
 }
 
-function voidPendingBets() {
-  const market = getMarket(state.matchId);
-  if (!market) return;
-  const wallets = getWallets();
-  let voided = false;
-  market.bets.forEach(bet => {
-    if (bet.status !== 'pending') return;
-    bet.status = 'void';
-    wallets[bet.user].points += bet.liability; // refund
-    voided = true;
-  });
-  if (voided) { saveWallets(wallets); saveMarket(state.matchId, market); }
-}
 
 function recalculateLiveOdds() {
   state._prevBhav = state._currentBhav || null;
@@ -10992,100 +10804,8 @@ function _lvStreamLoop(mid, token) {
 
 
 /* ── AI BETTING ANALYSIS ────────────────────────────── */
-async function _triggerAIAnalysis(matchId) {
-  const btn = document.getElementById('lv-ai-refresh-btn');
-  const body = document.getElementById('lv-ai-body');
-  if(btn) { btn.textContent = '⏳'; btn.disabled = true; }
-  if(body) body.innerHTML = '<div style="color:rgba(255,255,255,0.4);font-size:12px;text-align:center;padding:12px 0">Analysing with Claude AI…</div>';
 
-  try {
-    // Get match context from n8n (analytics + current state)
-    const res = await apiCall('get_ai_odds', {match_id: matchId});
-    const ctx = res.context;
-    if(!ctx) throw new Error('No match context');
 
-    // Call AI sub-workflow (key is embedded server-side)
-    const aiRes = await fetch('https://n8n.barandates.in/webhook/cricket-ai', {
-      method: 'POST',
-      headers: {'content-type': 'application/json'},
-      body: JSON.stringify({match_id: matchId, context: ctx})
-    });
-    const data = await aiRes.json();
-
-    if(data.analysis) {
-      window._aiCache = window._aiCache || {};
-      window._aiCache[matchId] = {...data.analysis, ts: Date.now()};
-      _renderAIPanel(data.analysis, matchId);
-    } else if(data.error) {
-      if(body) body.innerHTML = `<div style="color:#f87171;font-size:11px;text-align:center;padding:8px 0">AI unavailable: ${data.error}<br><span style="color:rgba(255,255,255,0.3)">Add anthropic_key to credentials.json and redeploy</span></div>`;
-    }
-  } catch(e) {
-    if(body) body.innerHTML = '<div style="color:#f87171;font-size:11px;text-align:center;padding:8px 0">AI analysis unavailable</div>';
-  } finally {
-    if(btn) { btn.textContent = '↻ Analyse'; btn.disabled = false; }
-  }
-}
-
-function _renderAIPanel(ai, matchId) {
-  const body = document.getElementById('lv-ai-body');
-  if(!body) return;
-
-  const momEmoji = {batting:'🔴', bowling:'🟢', neutral:'⚖️'};
-  const momColor  = {batting:'#f87171', bowling:'#4ade80', neutral:'#facc15'};
-  const mom = ai.momentum || 'neutral';
-  const batPct  = Math.round((ai.win_prob?.bat || 0.5) * 100);
-  const bowlPct = 100 - batPct;
-  const batTeam  = ai.bat_team  || 'Batting';
-  const bowlTeam = ai.bowl_team || 'Bowling';
-
-  const factors = (ai.key_factors || []).map(f =>
-    `<span style="background:rgba(255,255,255,0.09);border-radius:20px;padding:3px 10px;font-size:10px;color:rgba(255,255,255,0.75);font-weight:600;white-space:nowrap">${f}</span>`
-  ).join('');
-
-  const nextOver = ai.next_over
-    ? `<div style="background:rgba(255,255,255,0.06);border-radius:8px;padding:8px 10px;margin-top:8px"><span style="color:rgba(255,255,255,0.4);font-size:9px;font-weight:700;text-transform:uppercase">Next Over · </span><span style="color:#fff;font-size:12px;font-weight:600">${ai.next_over.runs} runs · Wicket: ${ai.next_over.wicket}</span></div>`
-    : '';
-
-  const confidence = ai.confidence
-    ? `<span style="color:rgba(255,255,255,0.3);font-size:9px;font-weight:600;text-transform:uppercase"> · ${ai.confidence} confidence</span>` : '';
-
-  body.innerHTML = `
-    <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
-      <span style="font-size:18px">${momEmoji[mom]||'⚖️'}</span>
-      <span style="color:${momColor[mom]||'#facc15'};font-size:13px;font-weight:800">${mom.charAt(0).toUpperCase()+mom.slice(1)} team has momentum</span>
-    </div>
-    <div style="margin-bottom:9px">
-      <div style="display:flex;justify-content:space-between;font-size:11px;font-weight:700;margin-bottom:5px">
-        <span style="color:#4ade80">${batTeam} ${batPct}%</span>
-        <span>${confidence}</span>
-        <span style="color:#f87171">${bowlTeam} ${bowlPct}%</span>
-      </div>
-      <div style="height:8px;border-radius:4px;background:rgba(248,113,113,0.3);overflow:hidden">
-        <div style="height:100%;width:${batPct}%;background:linear-gradient(90deg,#4ade80,#22c55e);border-radius:4px;transition:width 0.6s ease"></div>
-      </div>
-    </div>
-    <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px">${factors}</div>
-    ${nextOver}
-    ${ai.narrative ? `<div style="color:rgba(255,255,255,0.45);font-size:11px;font-style:italic;margin-top:8px;line-height:1.5">"${ai.narrative}"</div>` : ''}
-    <div style="margin-top:8px;color:rgba(255,255,255,0.12);font-size:9px">Powered by Claude AI (claude-haiku)</div>
-  `;
-
-  // Update age badge
-  const ageEl = document.getElementById('lv-ai-age');
-  if(ageEl && ai.ts) {
-    const mins = Math.max(0, Math.floor((Date.now()-ai.ts)/60000));
-    ageEl.textContent = mins > 0 ? `${mins}m ago` : 'just now';
-  }
-}
-
-function _loadAICacheIfFresh(matchId) {
-  const c = (window._aiCache||{})[matchId];
-  if(!c) return false;
-  const age = Date.now() - (c.ts || 0);
-  if(age > 300000) return false; // stale after 5 min
-  _renderAIPanel(c, matchId);
-  return true;
-}
 
 /* ── PUSH NOTIFICATIONS ─────────────────────────────── */
 const VAPID_PUBLIC_KEY = 'BBAHocCGZSpj0SHqQ6wguWgiR2eevuD_qWdLosMzgHxwfq7eFZzWgHRo_PUtKd0Up2FHRLnDw8Fo5SWrSwsVpQ0';
@@ -11190,27 +10910,6 @@ function isSpectatorMode() {
 let _livePollingId = null;
 let _lastScoreHash = '';
 
-function startLivePolling() {
-  stopLivePolling();
-  _livePollingId = setInterval(async () => {
-    if(!state.matchId) return;
-    const route = getRoute();
-    if(route.page !== 'scoring') { stopLivePolling(); return; }
-    if(isAnyModalOpen() || state.pendingRequest) return;
-    try {
-      const res = await apiCall('get_state', {match_id: state.matchId});
-      if(res.error) return;
-      const hash = `${res.score?.runs}-${res.score?.wickets}-${res.score?.balls}`;
-      if(hash !== _lastScoreHash) {
-        _lastScoreHash = hash;
-        Object.assign(state, res);
-        state.matchId = state.matchId; // preserve
-        drawScoring();
-        if(navigator.vibrate) navigator.vibrate(100);
-      }
-    } catch(e) { /* silent fail on poll */ }
-  }, 4000); // poll every 4 seconds
-}
 
 function stopLivePolling() {
   if(_livePollingId) { clearInterval(_livePollingId); _livePollingId = null; }
@@ -11504,29 +11203,9 @@ function _helpTab(tab) {
   <div style="position:absolute;bottom:0;left:0;right:0;background:var(--bg-card);border-radius:20px 20px 0 0;padding:12px 0 40px;box-shadow:0 -4px 30px rgba(0,0,0,0.15)">
     <div style="width:40px;height:4px;background:var(--border);border-radius:2px;margin:0 auto 16px"></div>
     <div style="padding:0 16px;display:flex;flex-direction:column;gap:2px">
-      <button onclick="document.getElementById('cb-more-sheet').style.display='none';navigate('quick-setup')" style="display:flex;align-items:center;gap:14px;padding:14px 12px;border:none;background:none;width:100%;text-align:left;cursor:pointer;border-radius:10px;touch-action:manipulation">
-        <span style="width:40px;height:40px;border-radius:12px;background:#d0021b;display:flex;align-items:center;justify-content:center;font-size:20px">⚡</span>
-        <div><div style="font-weight:700;font-size:15px;color:var(--text)">Quick Match</div><div style="font-size:12px;color:var(--text2)">Start fast — add players as you go</div></div>
-      </button>
-      <button onclick="document.getElementById('cb-more-sheet').style.display='none';navigate('setup')" style="display:flex;align-items:center;gap:14px;padding:14px 12px;border:none;background:none;width:100%;text-align:left;cursor:pointer;border-radius:10px;touch-action:manipulation">
-        <span style="width:40px;height:40px;border-radius:12px;background:#2563eb;display:flex;align-items:center;justify-content:center;font-size:20px">📋</span>
-        <div><div style="font-weight:700;font-size:15px;color:var(--text)">New Match</div><div style="font-size:12px;color:var(--text2)">Full setup with teams & rules</div></div>
-      </button>
-      <button onclick="document.getElementById('cb-more-sheet').style.display='none';navigate('team-draft')" style="display:flex;align-items:center;gap:14px;padding:14px 12px;border:none;background:none;width:100%;text-align:left;cursor:pointer;border-radius:10px;touch-action:manipulation">
-        <span style="width:40px;height:40px;border-radius:12px;background:#16a34a;display:flex;align-items:center;justify-content:center;font-size:20px">🏆</span>
-        <div><div style="font-weight:700;font-size:15px;color:var(--text)">Play Series</div><div style="font-size:12px;color:var(--text2)">Draft teams & play multiple matches</div></div>
-      </button>
       <button onclick="document.getElementById('cb-more-sheet').style.display='none';showJoinMatchModal()" style="display:flex;align-items:center;gap:14px;padding:14px 12px;border:none;background:none;width:100%;text-align:left;cursor:pointer;border-radius:10px;touch-action:manipulation">
         <span style="width:40px;height:40px;border-radius:12px;background:#7c3aed;display:flex;align-items:center;justify-content:center;font-size:20px">🏟</span>
-        <div><div style="font-weight:700;font-size:15px;color:var(--text)">Join Match</div><div style="font-size:12px;color:var(--text2)">Enter invite code to watch & bet</div></div>
-      </button>
-      <button onclick="document.getElementById('cb-more-sheet').style.display='none';navigate('score-only')" style="display:flex;align-items:center;gap:14px;padding:14px 12px;border:none;background:none;width:100%;text-align:left;cursor:pointer;border-radius:10px;touch-action:manipulation">
-        <span style="width:40px;height:40px;border-radius:12px;background:#f59e0b;display:flex;align-items:center;justify-content:center;font-size:20px">🎯</span>
-        <div><div style="font-weight:700;font-size:15px;color:var(--text)">Score Only</div><div style="font-size:12px;color:var(--text2)">Just track runs, no player names</div></div>
-      </button>
-      <button onclick="document.getElementById('cb-more-sheet').style.display='none';navigate('toss-only')" style="display:flex;align-items:center;gap:14px;padding:14px 12px;border:none;background:none;width:100%;text-align:left;cursor:pointer;border-radius:10px;touch-action:manipulation">
-        <span style="width:40px;height:40px;border-radius:12px;background:#0ea5e9;display:flex;align-items:center;justify-content:center;font-size:20px">🪙</span>
-        <div><div style="font-weight:700;font-size:15px;color:var(--text)">Quick Toss</div><div style="font-size:12px;color:var(--text2)">Flip a coin — heads or tails</div></div>
+        <div><div style="font-weight:700;font-size:15px;color:var(--text)">Join as co-scorer</div><div style="font-size:12px;color:var(--text2)">Enter the 4-digit code the scorer sent you</div></div>
       </button>
       <button onclick="document.getElementById('cb-more-sheet').style.display='none';navigate('highlights')" style="display:flex;align-items:center;gap:14px;padding:14px 12px;border:none;background:none;width:100%;text-align:left;cursor:pointer;border-radius:10px;touch-action:manipulation">
         <span style="width:40px;height:40px;border-radius:12px;background:#7c3aed;display:flex;align-items:center;justify-content:center;font-size:20px">🎬</span>
@@ -11539,7 +11218,7 @@ function _helpTab(tab) {
       </button>
       <button onclick="document.getElementById('cb-more-sheet').style.display='none';toggleTheme()" style="display:flex;align-items:center;gap:14px;padding:14px 12px;border:none;background:none;width:100%;text-align:left;cursor:pointer;border-radius:10px;touch-action:manipulation">
         <span style="width:40px;height:40px;border-radius:12px;background:var(--border);display:flex;align-items:center;justify-content:center;font-size:20px">🌙</span>
-        <div style="font-weight:700;font-size:15px;color:var(--text)">Toggle Dark Mode</div>
+        <div style="font-weight:700;font-size:15px;color:var(--text)">Dark mode on / off</div>
       </button>
     </div>
   </div>
@@ -11559,18 +11238,18 @@ if(window.speechSynthesis) {
     <svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
     <span style="font-size:10px;font-weight:700">Home</span>
   </button>
-  <button id="tab-matches" onclick="_setTab('tab-matches');navigate('home')" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border:none;background:none;cursor:pointer;touch-action:manipulation;color:var(--text2);padding:0">
+  <button id="tab-matches" onclick="_setTab('tab-matches');navigate('matches')" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border:none;background:none;cursor:pointer;touch-action:manipulation;color:var(--text2);padding:0">
     <svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 3c1.93 0 3.5 1.57 3.5 3.5S13.93 13 12 13s-3.5-1.57-3.5-3.5S10.07 6 12 6zm7 13H5v-.23c0-.62.28-1.2.76-1.58C7.47 15.82 9.64 15 12 15s4.53.82 6.24 2.19c.48.38.76.97.76 1.58V19z"/></svg>
     <span style="font-size:10px;font-weight:600">Matches</span>
   </button>
-  <button onclick="navigate('quick-setup')" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;border:none;background:none;cursor:pointer;touch-action:manipulation;padding:0;padding-bottom:6px">
+  <button onclick="openStartSheet()" aria-label="Start a match" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;border:none;background:none;cursor:pointer;touch-action:manipulation;padding:0;padding-bottom:6px">
     <div style="width:48px;height:48px;border-radius:50%;background:#d0021b;display:flex;align-items:center;justify-content:center;color:#fff;font-size:30px;line-height:1;box-shadow:0 2px 10px rgba(208,2,27,0.45);margin-top:-16px">+</div>
   </button>
   <button id="tab-players" onclick="_setTab('tab-players');navigate('players')" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border:none;background:none;cursor:pointer;touch-action:manipulation;color:var(--text2);padding:0">
     <svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
     <span style="font-size:10px;font-weight:600">Players</span>
   </button>
-  <button id="tab-more" onclick="_setTab('tab-more');document.getElementById('cb-more-sheet').style.display='flex'" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border:none;background:none;cursor:pointer;touch-action:manipulation;color:var(--text2);padding:0">
+  <button id="tab-more" onclick="_closeSheets();_setTab('tab-more');document.getElementById('cb-more-sheet').style.display='flex'" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border:none;background:none;cursor:pointer;touch-action:manipulation;color:var(--text2);padding:0">
     <svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22"><path d="M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
     <span style="font-size:10px;font-weight:600">More</span>
   </button>
