@@ -93,6 +93,9 @@ tailwind.config = {
 button.text-2xl.leading-none, button[aria-label="Back"], button[onclick^="navigate('home')"]:not([class*="py-"]), button[onclick="history.back()"] { min-width: 44px; min-height: 44px; }
 span[onclick^="promptRenamePlayer"] { display: inline-block; padding: 6px 4px; margin: -6px -4px; }
 body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; }
+/* body scrolls, not the window. When the window scrolls, iPhone Safari shrinks its address bar and drags fixed bars (the bottom tabs) out of place. */
+html { height: 100%; overflow: hidden; overscroll-behavior: none; }
+body { height: 100%; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; overscroll-behavior-y: none; }
 .card { background: var(--bg-card); border: 1px solid var(--border); }
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 50; display: flex; align-items: flex-end; justify-content: center; overflow-y: auto; }
 .modal-content { width: 100%; max-width: 32rem; border-radius: 1rem 1rem 0 0; padding: 1.25rem; background: var(--bg-card); max-height: 85vh; overflow-y: auto; padding-bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px)); }
@@ -677,7 +680,6 @@ function _showTabBar(show) {
   const safeOffset = 'calc(58px + env(safe-area-inset-bottom, 0px))';
   const app = document.getElementById('app');
   if(app) app.style.paddingBottom = show ? safeOffset : '0';
-  document.body.style.paddingBottom = show ? safeOffset : '0';
 }
 function _logVisit(page, param) {
   try {
@@ -691,7 +693,7 @@ function _logVisit(page, param) {
 
 function route() {
   _closeSheets();
-  try { window.scrollTo({ top: 0, left: 0, behavior: 'instant' }); } catch(e) { window.scrollTo(0, 0); }
+  document.body.scrollTop = 0;
   stopAutoSync();
   stopLivePolling();
   stopLiveViewPolling();
@@ -10711,7 +10713,7 @@ function _lvPaint(animate) {
   });
   _lvSet('lv-s-feed', feed);
   LV.seen = keys;
-  if(anchor) { const row = document.querySelector('#lv-s-feed .lv-ball[data-k="' + anchor.k + '"]'); if(row) { const dy = row.getBoundingClientRect().top - anchor.top; if(Math.abs(dy) >= 1) window.scrollBy({ top: dy, left: 0, behavior: 'instant' }); } }
+  if(anchor) { const row = document.querySelector('#lv-s-feed .lv-ball[data-k="' + anchor.k + '"]'); if(row) { const dy = row.getBoundingClientRect().top - anchor.top; if(Math.abs(dy) >= 1) document.body.scrollBy({ top: dy, left: 0, behavior: 'instant' }); } }
 
   _lvPaintScorecard();
 
