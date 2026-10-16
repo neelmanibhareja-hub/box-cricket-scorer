@@ -3411,7 +3411,7 @@ function _drawScoringInner() {
       </div>
       <div class="flex items-baseline gap-2 mt-1">
         <span class="text-4xl font-black tracking-tight">${s.runs}/${s.wickets}</span>
-        <span class="text-lg font-medium" style="color:var(--text2)">(${formatOvers(s.balls)} / ${totalOvers} ov)</span>
+        ${(state.innings||1)===1 && !state.match?.is_super_over ? `<button onclick="showEditOversModal()" aria-label="Change overs" class="text-lg font-medium" style="color:var(--text2);background:none;border:0;border-bottom:1px dashed var(--text2);padding:0;touch-action:manipulation">(${formatOvers(s.balls)} / ${totalOvers} ov ✎)</button>` : `<span class="text-lg font-medium" style="color:var(--text2)">(${formatOvers(s.balls)} / ${totalOvers} ov)</span>`}
       </div>
       <div class="w-full h-1.5 rounded-full mt-1.5" style="background:var(--border)">
         <div class="h-full rounded-full bg-cricket-500 transition-all" style="width:${Math.min(100,(s.balls/maxBalls)*100)}%"></div>
@@ -4521,39 +4521,56 @@ async function promptRenamePlayer(oldName) {
 
 function showEditOversModal() {
   document.getElementById('edit-overs-modal')?.remove();
+  if ((state.innings || 1) !== 1) { showToast('Overs can only be changed in the first innings. Both teams must get the same overs.'); return; }
   const cur = state.match?.overs || 5;
+  const bowled = state.score?.balls || 0;
+  const min = Math.floor(bowled / 6) + 1;                     // must stay above what is already bowled
+  window._editOversVal = Math.max(cur, min);
   const el = document.createElement('div');
   el.id = 'edit-overs-modal';
   el.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;padding:16px';
+  el.onclick = e => { if (e.target === el) el.remove(); };
+  const sb = 'width:64px;height:64px;border-radius:16px;border:2px solid var(--border);background:var(--bg);font-size:32px;font-weight:800;color:var(--text);touch-action:manipulation';
   el.innerHTML = `
-    <div style="background:var(--bg-card);border-radius:16px;padding:20px;width:100%;max-width:320px;box-shadow:0 8px 32px rgba(0,0,0,0.3)">
-      <div style="font-size:16px;font-weight:800;margin-bottom:4px">🔢 Change Overs</div>
-      <div style="font-size:12px;color:var(--text2);margin-bottom:16px">Current: <b>${cur} overs</b> — choose new total</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
-        ${[4,5,6,7,8,10,12,15,20].map(n=>`<button onclick="window._editOversVal=${n};document.querySelectorAll('#edit-overs-modal .ov-btn').forEach(b=>b.style.background='var(--bg)');this.style.background='var(--cricket-500,#16a34a)';this.style.color='#fff'" class="ov-btn" style="flex:1;min-width:44px;padding:10px 0;border-radius:10px;border:1px solid var(--border);font-size:15px;font-weight:800;background:${n===cur?'var(--cricket-500,#16a34a)':'var(--bg)'};color:${n===cur?'#fff':'var(--text)'};touch-action:manipulation">${n}</button>`).join('')}
+    <div style="background:var(--bg-card);border-radius:18px;padding:22px;width:100%;max-width:340px;box-shadow:0 8px 32px rgba(0,0,0,0.3)">
+      <div style="font-size:19px;font-weight:800;margin-bottom:4px">Change overs</div>
+      <div style="font-size:14px;color:var(--text2);margin-bottom:18px">Overs per side. Now <b>${cur}</b>${bowled ? `, <b>${formatOvers(bowled)}</b> bowled so far` : ''}.</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px">
+        <button id="ov-minus" onclick="_stepOvers(-1)" aria-label="One over less" style="${sb}">−</button>
+        <div style="text-align:center"><div id="ov-val" style="font-size:48px;font-weight:900;line-height:1;font-variant-numeric:tabular-nums">${window._editOversVal}</div><div style="font-size:13px;color:var(--text2);margin-top:4px">overs</div></div>
+        <button id="ov-plus" onclick="_stepOvers(1)" aria-label="One over more" style="${sb}">+</button>
       </div>
-      <div style="display:flex;gap:8px">
-        <button onclick="document.getElementById('edit-overs-modal').remove()" style="flex:1;padding:12px;border-radius:10px;border:1px solid var(--border);background:var(--bg);font-size:14px;font-weight:700;touch-action:manipulation">Cancel</button>
-        <button onclick="applyEditOvers()" style="flex:2;padding:12px;border-radius:10px;border:none;background:#16a34a;color:#fff;font-size:14px;font-weight:800;touch-action:manipulation">Save</button>
+      <div id="ov-hint" style="font-size:13px;color:var(--text2);text-align:center;min-height:18px;margin-bottom:16px">${bowled ? 'Lowest allowed: ' + min : ''}</div>
+      <div style="display:flex;gap:10px">
+        <button onclick="document.getElementById('edit-overs-modal').remove()" style="flex:1;min-height:52px;border-radius:12px;border:1px solid var(--border);background:var(--bg);font-size:16px;font-weight:700;color:var(--text);touch-action:manipulation">Cancel</button>
+        <button onclick="applyEditOvers()" style="flex:2;min-height:52px;border-radius:12px;border:none;background:#16a34a;color:#fff;font-size:16px;font-weight:800;touch-action:manipulation">Save</button>
       </div>
     </div>`;
-  window._editOversVal = cur;
+  el.dataset.min = min;
   document.body.appendChild(el);
-  // Pre-highlight current value
-  el.querySelectorAll('.ov-btn').forEach(b => { if(parseInt(b.textContent)===cur){b.style.background='#16a34a';b.style.color='#fff';} });
+  _stepOvers(0);
+}
+function _stepOvers(d) {
+  const el = document.getElementById('edit-overs-modal'); if (!el) return;
+  const min = Number(el.dataset.min) || 1;
+  window._editOversVal = Math.min(50, Math.max(min, (window._editOversVal || min) + d));
+  document.getElementById('ov-val').textContent = window._editOversVal;
+  document.getElementById('ov-minus').disabled = window._editOversVal <= min;
+  document.getElementById('ov-minus').style.opacity = window._editOversVal <= min ? .35 : 1;
+  document.getElementById('ov-plus').disabled = window._editOversVal >= 50;
 }
 async function applyEditOvers() {
   const newOv = window._editOversVal;
-  if(!newOv || newOv < 1 || newOv > 50) return;
-  const matchId = state.matchId;
+  if (!newOv || newOv < 1 || newOv > 50) return;
   document.getElementById('edit-overs-modal')?.remove();
+  if (newOv === (state.match?.overs || 5)) return;
   try {
-    const res = await apiCall('admin_fix', {match_id: matchId, fixes: {overs: newOv}});
-    if(res.error) { showToast('Error: ' + res.error); return; }
-    state.match = res.match;
-    showToast('Overs changed to ' + newOv + ' ✔');
+    const res = await apiCall('set_overs', { match_id: state.matchId, overs: newOv });
+    if (res.error) { showToast(res.error); return; }
+    state.match = Object.assign({}, state.match, res.match);
+    showToast('Now ' + newOv + ' overs a side');
     drawScoring();
-  } catch(e) { showToast('Error: ' + e.message); }
+  } catch (e) { showToast('Could not change overs: ' + e.message); }
 }
 
 function showSetScoreModal() {
