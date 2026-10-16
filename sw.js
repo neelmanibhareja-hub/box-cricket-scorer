@@ -1,4 +1,4 @@
-const CACHE_NAME = 'cricket-v73';
+const CACHE_NAME = 'cricket-v74';
 const CDN_URLS = [
   'https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js'
 ];
