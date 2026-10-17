@@ -48,6 +48,8 @@ if('serviceWorker' in navigator){
   justify-content: center;
 }
 .scoring-btn:active { transform: scale(0.93); }
+.scoring-btn.kp { flex-direction: column; gap: 2px; line-height: 1; }
+.kp-l { font-size: 0.62rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; opacity: .8; }
 .scoring-btn:disabled { opacity: 0.5; pointer-events: none; animation: btn-pulse 0.8s ease-in-out infinite; }
 @keyframes btn-pulse { 0%,100%{opacity:0.5} 50%{opacity:0.3} }
 .wicket-btn { background: linear-gradient(135deg, #ef4444, #dc2626); }
@@ -1099,6 +1101,7 @@ async function renderHome() {
         ${live.length ? `<button onclick="closeAllLiveMatches()" class="h-btn" style="color:#b45309">End all live matches (${live.length})</button>` : ''}
         <button onclick="showVisitorsPanel()" class="h-btn">View all users</button>
         <button onclick="downloadVisitorsCSV()" class="h-btn">Download visitors (Excel)</button>
+        <button onclick="showCrashReports()" class="h-btn">Crash reports from phones</button>
         ${ms.length ? `<button onclick="deleteAllMatches()" class="h-btn" style="color:#dc2626">Delete all matches (${ms.length})</button>` : ''}
       </div>` : ''}
       ${renderBettingLedger()}
@@ -1119,7 +1122,7 @@ function _drawMatches(ms) {
   const is = (k, m) => k === 'all' ? true : k === 'live' ? (m.status === 'live' && !_matchIsStale(m))
     : k === 'soon' ? (m.status === 'created' && !_matchNeverStarted(m)) : (m.status === 'completed' || _matchIsStale(m) || _matchNeverStarted(m));
   const list = ms.filter(m => is(f, m)).sort(_byNewest);
-  const chip = (k, t, n) => `<button class="${f === k ? 'on' : ''}" onclick="_setMatchesFilter('${k}')">${t}${n ? ' · ' + n : ''}</button>`;
+  const chip = (k, t, n) => `<button class="${f === k ? 'on' : ''}" onclick="_setMatchesFilter('${k}')">${t} (${n || 0})</button>`;
   const counts = { all: ms.length, live: ms.filter(m => is('live', m)).length, soon: ms.filter(m => is('soon', m)).length, done: ms.filter(m => is('done', m)).length };
   let lastDay = '', body = '';
   list.forEach(m => { const day = (_matchWhen(m).split(',')[0]) || ''; if (day !== lastDay) { body += `<div class="h-sec"><h2>${_escHtml(day)}</h2></div>`; lastDay = day; } body += `<div style="margin-bottom:10px">${_matchCard(m)}</div>`; });
@@ -3691,18 +3694,18 @@ function renderQuickScoring(disabled) {
   return `<div class="mx-2 mt-2 space-y-1.5 no-print">
     ${state.isFreeHit ? `<div class="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-yellow-400 dark:bg-yellow-500 text-black font-extrabold text-sm animate-pulse"><span class="text-lg">&#9889;</span> FREE HIT <span class="text-lg">&#9889;</span></div>` : ''}
     <div class="grid grid-cols-4 gap-1.5">
-      <button onclick="scoreBall(0)" ${disabled} class="scoring-btn rounded-xl bg-gray-200 dark:bg-gray-700">0</button>
-      <button onclick="scoreBall(1)" ${disabled} class="scoring-btn rounded-xl bg-blue-100 dark:bg-blue-900/70 text-blue-700 dark:text-blue-300">1</button>
-      <button onclick="scoreBall(2)" ${disabled} class="scoring-btn rounded-xl bg-blue-100 dark:bg-blue-900/70 text-blue-700 dark:text-blue-300">2</button>
-      <button onclick="scoreBall(3)" ${disabled} class="scoring-btn rounded-xl bg-blue-200 dark:bg-blue-800 text-blue-800 dark:text-blue-200">3</button>
+      <button onclick="scoreBall(0)" ${disabled} class="scoring-btn kp rounded-xl bg-gray-200 dark:bg-gray-700">0<small class="kp-l">dot ball</small></button>
+      <button onclick="scoreBall(1)" ${disabled} class="scoring-btn kp rounded-xl bg-blue-100 dark:bg-blue-900/70 text-blue-700 dark:text-blue-300">1<small class="kp-l">run</small></button>
+      <button onclick="scoreBall(2)" ${disabled} class="scoring-btn kp rounded-xl bg-blue-100 dark:bg-blue-900/70 text-blue-700 dark:text-blue-300">2<small class="kp-l">runs</small></button>
+      <button onclick="scoreBall(3)" ${disabled} class="scoring-btn kp rounded-xl bg-blue-200 dark:bg-blue-800 text-blue-800 dark:text-blue-200">3<small class="kp-l">runs</small></button>
     </div>
     <div class="grid grid-cols-4 gap-1.5">
-      <button onclick="scoreBall(4)" ${disabled} class="scoring-btn rounded-xl bg-amber-100 dark:bg-amber-900/70 text-amber-700 dark:text-amber-300">4</button>
-      <button onclick="scoreBall(6)" ${disabled} class="scoring-btn rounded-xl bg-green-100 dark:bg-green-900/70 text-green-700 dark:text-green-300">6</button>
-      <button onclick="showWideModal()" ${disabled} class="scoring-btn rounded-xl bg-purple-100 dark:bg-purple-900/70 text-purple-700 dark:text-purple-300 text-base">Wd</button>
-      <button onclick="showNoBallModal()" ${disabled} class="scoring-btn rounded-xl bg-purple-100 dark:bg-purple-900/70 text-purple-700 dark:text-purple-300 text-base">Nb</button>
+      <button onclick="scoreBall(4)" ${disabled} class="scoring-btn kp rounded-xl bg-amber-100 dark:bg-amber-900/70 text-amber-700 dark:text-amber-300">4<small class="kp-l">FOUR</small></button>
+      <button onclick="scoreBall(6)" ${disabled} class="scoring-btn kp rounded-xl bg-green-100 dark:bg-green-900/70 text-green-700 dark:text-green-300">6<small class="kp-l">SIX</small></button>
+      <button onclick="showWideModal()" ${disabled} class="scoring-btn kp rounded-xl bg-purple-100 dark:bg-purple-900/70 text-purple-700 dark:text-purple-300 text-base">Wd<small class="kp-l">wide +1</small></button>
+      <button onclick="showNoBallModal()" ${disabled} class="scoring-btn kp rounded-xl bg-purple-100 dark:bg-purple-900/70 text-purple-700 dark:text-purple-300 text-base">Nb<small class="kp-l">no ball +1</small></button>
     </div>
-    <button onclick="showWicketModal()" ${disabled} class="scoring-btn w-full rounded-xl wicket-btn text-white">${state.isFreeHit ? 'WICKET (Run Out only)' : 'WICKET'}</button>
+    <button onclick="showWicketModal()" ${disabled} class="scoring-btn w-full rounded-xl wicket-btn text-white">${state.isFreeHit ? 'WICKET (Run Out only)' : 'OUT / WICKET'}</button>
     <div class="grid grid-cols-4 gap-1.5">
       <button onclick="undoLastBall()" ${disabled} class="scoring-btn rounded-xl bg-gray-200 dark:bg-gray-700 text-sm">\u21A9 Undo</button>
       <button onclick="showExtrasModal()" ${disabled} class="scoring-btn rounded-xl bg-gray-200 dark:bg-gray-700 text-sm">Bye/LB</button>
@@ -6816,13 +6819,29 @@ function setPendingRetry(fn) {
   if(fn) { _retryTimer = setTimeout(() => { _pendingBallRetry = null; _retryTimer = null; }, 30000); }
 }
 
+// Crash reports: send JavaScript errors to the server so problems on players' phones become visible (Admin → Crash reports).
+// At most 5 per visit, never the same one twice, browser noise skipped, sent straight (never queued behind scoring).
+const _errSent = new Set();
+function _reportError(msg, where, stack) {
+  try {
+    msg = String(msg || '').slice(0, 300);
+    if (!msg || _errSent.size >= 5 || _errSent.has(msg)) return;
+    if (/ResizeObserver loop|^Script error\.?$|extension:|AbortError|The user aborted|Load failed|Failed to fetch|NetworkError|NotAllowedError|play\(\) request was interrupted/i.test(msg)) return;
+    _errSent.add(msg);
+    fetch(WEBHOOK_URL, { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'log_client_error', msg, where: String(where || '').slice(0, 160), stack: String(stack || '').slice(0, 600),
+        page: location.hash.slice(0, 80), ua: navigator.userAgent.slice(0, 120) }) }).catch(() => {});
+  } catch (e) {}
+}
 window.addEventListener('error', function(e) {
   console.error('Global error:', e.error);
+  if (e && e.message) _reportError(e.message, (e.filename || '').split('/').pop() + ':' + (e.lineno || 0) + ':' + (e.colno || 0), e.error && e.error.stack);
   if(state.pendingRequest) { state.pendingRequest = false; if(_pendingTimer) { clearTimeout(_pendingTimer); _pendingTimer = null; } }
   if(_onScoringPage() && !isAnyModalOpen()) { try { drawScoring(); } catch(e2) {} }
 });
 window.addEventListener('unhandledrejection', function(e) {
   console.error('Unhandled promise rejection:', e.reason);
+  const r = e && e.reason; _reportError(r && r.message ? r.message : String(r), 'promise', r && r.stack);
   if(state.pendingRequest) { state.pendingRequest = false; if(_pendingTimer) { clearTimeout(_pendingTimer); _pendingTimer = null; } }
   if(_onScoringPage() && !isAnyModalOpen()) { try { drawScoring(); } catch(e2) {} }
 });
@@ -10560,6 +10579,10 @@ const LV_CSS = `
 .lv-head{gap:8px;flex-wrap:wrap}
 .lv-title{order:9;flex:1 1 100%;font-size:17px;padding:0 4px 2px;overflow-wrap:normal}
 #lv-badge{margin-right:auto}
+.lv-ff{display:flex;gap:8px;margin:4px 0 10px;flex-wrap:wrap}
+.lv-ff button{min-height:44px;padding:0 16px;border-radius:22px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:15px;font-weight:700;cursor:pointer;touch-action:manipulation}
+.lv-ff button.on{background:var(--brand);border-color:var(--brand);color:#fff}
+#lv-s-feed.f-b .lv-ball:not(.k4):not(.k6),#lv-s-feed.f-w .lv-ball:not(.kw),#lv-s-feed.f-b .lv-ovbar.eo,#lv-s-feed.f-w .lv-ovbar.eo{display:none}
 `;
 
 function stopLiveViewPolling() {
@@ -10646,6 +10669,48 @@ function _lvError(msg) {
 }
 
 // Text size for the match page: A+ steps 100% -> 112% -> 125% -> back. Remembered on this phone.
+// Ball-by-ball filter: all balls, only 4s and 6s, or only wickets. Rows are hidden with CSS, so live updates keep working.
+// Worm chart: each team's total after every over, so a chase can be read at a glance. Red dots are wickets.
+function _lvWorm(d) {
+  const E = _escHtml;
+  const maxOv = Math.max(1, Number(d.match.overs) || 1);
+  const series = d.innings.filter(i => i.over_list.length).map(i => {
+    let tot = 0; const pts = [[0, 0]], wk = [];
+    i.over_list.forEach(o => {
+      tot += o.runs || 0;
+      const legal = o.done ? 6 : o.balls.filter(b => b.k !== 'x').length;
+      const x = (o.n - 1) + legal / 6; pts.push([x, tot]); if (o.wkts) wk.push([x, tot, o.wkts]);
+    });
+    return { team: i.batting_team, pts, wk, runs: i.runs, wkts: i.wickets };
+  });
+  if (!series.length) return '';
+  const top = Math.max(10, Math.ceil(Math.max(...series.map(t => t.pts[t.pts.length - 1][1])) / 10) * 10);
+  const W = 320, H = 170, L = 30, R = 10, T = 10, B = 26, X = v => L + v / maxOv * (W - L - R), Y = v => T + (1 - v / top) * (H - T - B);
+  const colors = ['var(--brand-text)', '#f5b942'];
+  const step = maxOv <= 10 ? 1 : maxOv <= 20 ? 2 : 5;
+  let g = '';
+  for (const v of [0, top / 2, top]) g += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--border)" stroke-width="1"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end" font-size="11" fill="var(--text2)">${Math.round(v)}</text>`;
+  for (let o = 0; o <= maxOv; o += step) g += `<text x="${X(o)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="var(--text2)">${o}</text>`;
+  series.forEach((t, k) => {
+    g += `<polyline fill="none" stroke="${colors[k]}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" points="${t.pts.map(p => X(p[0]).toFixed(1) + ',' + Y(p[1]).toFixed(1)).join(' ')}"/>`;
+    t.wk.forEach(w => { g += `<circle cx="${X(w[0]).toFixed(1)}" cy="${Y(w[1]).toFixed(1)}" r="5" fill="#ef4444" stroke="var(--bg-card)" stroke-width="2"><title>${w[2]} wicket${w[2] > 1 ? 's' : ''}</title></circle>`; });
+  });
+  const legend = series.map((t, k) => `<span style="display:inline-flex;align-items:center;gap:6px;margin-right:14px"><span style="width:14px;height:4px;border-radius:2px;background:${colors[k]}"></span><b style="color:var(--text)">${E(t.team)}</b> ${t.runs}/${t.wkts}</span>`).join('');
+  return `<div class="lv-card" style="padding:12px 12px 6px"><div style="font-size:15px;font-weight:800;margin-bottom:2px">Runs over by over</div>
+    <div style="font-size:13.5px;color:var(--text2);margin-bottom:6px">${legend}<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#ef4444"></span>wicket</span></div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Runs over by over">${g}</svg>
+    <div style="text-align:center;font-size:12px;color:var(--text2);margin-top:-2px">overs</div></div>`;
+}
+function _lvFilter(f) {
+  if (f) LV.filter = f; f = LV.filter || 'all';
+  const feed = document.getElementById('lv-s-feed'); if (!feed) return;
+  feed.classList.toggle('f-b', f === 'b'); feed.classList.toggle('f-w', f === 'w');
+  document.querySelectorAll('#lv-ff button').forEach(b => b.classList.toggle('on', b.dataset.f === f));
+  const sel = f === 'b' ? '.lv-ball.k4, .lv-ball.k6' : f === 'w' ? '.lv-ball.kw' : '.lv-ball';
+  const n = feed.querySelectorAll(sel).length, none = document.getElementById('lv-ff-none');
+  const ff = document.getElementById('lv-ff'); if (ff) ff.style.display = feed.querySelector('.lv-ball') ? '' : 'none';
+  if (none) { none.style.display = n || !feed.querySelector('.lv-ball') ? 'none' : ''; none.textContent = f === 'b' ? 'No fours or sixes yet' : 'No wickets yet'; }
+}
 function _lvZoom(step) {
   const sizes = [1, 1.12, 1.25];
   let z = 1; try { z = Number(localStorage.getItem('cricket_lvz')) || 1; } catch (e) {}
@@ -10682,7 +10747,8 @@ function _lvShell() {
           <div id="lv-watch-live-connecting" style="display:none"></div>
           <button id="lv-watch-live-btn" class="lv-btn pri" style="display:none" onclick="openLiveWatch(LV.mid)">● Watch live video</button>
         </div>
-        <div id="lv-s-feed"></div>
+        <div class="lv-ff" id="lv-ff" role="group" aria-label="Show balls"><button data-f="all" class="on" onclick="_lvFilter('all')">All balls</button><button data-f="b" onclick="_lvFilter('b')">4s &amp; 6s</button><button data-f="w" onclick="_lvFilter('w')">Wickets</button></div>
+        <div id="lv-s-feed"></div><div class="lv-empty" id="lv-ff-none" style="display:none"></div>
       </div>
       <div class="lv-pane" id="lv-pane-scorecard"><div id="lv-s-sc"></div></div>
       <div class="lv-pane" id="lv-pane-overs"><div id="lv-s-overs"></div></div>
@@ -10802,7 +10868,7 @@ function _lvPaint(animate) {
     if(!i.over_list.length) return;
     feed += `<div class="lv-card">${d.innings.length > 1 ? `<div class="lv-ovbar"><b>${E(i.batting_team)} innings</b><span class="r">${i.runs}/${i.wickets} (${i.overs})</span></div>` : ''}`;
     i.over_list.slice().reverse().forEach(o => {
-      if(o.done) feed += `<div class="lv-ovbar"><span>End of over <b>${o.n}</b></span><span>${E(o.bowler || '')}</span><span class="r">${o.runs} run${o.runs === 1 ? '' : 's'}${o.wkts ? ', ' + o.wkts + ' wkt' : ''} · ${o.score}</span></div>`;
+      if(o.done) feed += `<div class="lv-ovbar eo"><span>End of over <b>${o.n}</b></span><span>${E(o.bowler || '')}</span><span class="r">${o.runs} run${o.runs === 1 ? '' : 's'}${o.wkts ? ', ' + o.wkts + ' wkt' : ''} · ${o.score}</span></div>`;
       o.balls.slice().reverse().forEach(b => {
         const isNew = fresh.indexOf(i.n + ':' + b.id) >= 0;
         const txt = E(b.t).replace(/(FOUR|SIX|OUT!)/g, '<b>$1</b>');
@@ -10812,6 +10878,7 @@ function _lvPaint(animate) {
     feed += '</div>';
   });
   _lvSet('lv-s-feed', feed);
+  _lvFilter();
   LV.seen = keys;
   if(anchor) { const row = document.querySelector('#lv-s-feed .lv-ball[data-k="' + anchor.k + '"]'); if(row) { const dy = row.getBoundingClientRect().top - anchor.top; if(Math.abs(dy) >= 1) document.body.scrollBy({ top: dy, left: 0, behavior: 'instant' }); } }
 
@@ -10824,7 +10891,7 @@ function _lvPaint(animate) {
     ov += `<div class="lv-card">${d.innings.length > 1 ? `<div class="lv-ovbar"><b>${E(i.batting_team)}</b><span class="r">${i.runs}/${i.wickets}</span></div>` : ''}`
       + i.over_list.slice().reverse().map(o => `<div class="lv-kv"><span class="k" style="min-width:74px"><b style="color:var(--text)">Ov ${o.n}</b><br><span style="font-size:11.5px">${E(o.bowler || '')}</span></span><span class="v" style="flex:1"><div class="lv-chips">${o.balls.map(_lvChip).join('')}</div></span><span style="font-weight:800;white-space:nowrap;font-variant-numeric:tabular-nums">${o.runs}${o.wkts ? '-' + o.wkts : ''}<br><span style="font-weight:500;font-size:11.5px;color:var(--text2)">${o.score}</span></span></div>`).join('') + '</div>';
   });
-  _lvSet('lv-s-overs', ov || '<div class="lv-empty">No overs bowled yet</div>');
+  _lvSet('lv-s-overs', ov ? _lvWorm(d) + ov : '<div class="lv-empty">No overs bowled yet</div>');
 
   // ---- betting (same content as before the rebuild) ----
   const i1 = d.innings[0], i2 = d.innings[1];
@@ -11173,6 +11240,23 @@ function shareApp() {
 })();
 
 // ── Admin: show all visitors ──────────────────────────────────────────────────
+async function showCrashReports() {
+  const res = await apiCall('get_client_errors', {}).catch(() => null);
+  const list = (res && res.errors) || [];
+  document.getElementById('crash-sheet')?.remove();
+  const el = document.createElement('div'); el.id = 'crash-sheet'; el.className = 'modal-overlay'; el.style.display = 'flex';
+  el.onclick = e => { if (e.target === el) el.remove(); };
+  const when = t => new Date(t).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true });
+  el.innerHTML = `<div class="modal-content" style="max-height:85vh;overflow-y:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="font-size:19px;font-weight:800;margin:0">Crash reports</h3>
+      <button onclick="document.getElementById('crash-sheet').remove()" aria-label="Close" style="min-width:44px;min-height:44px;border:0;background:none;font-size:22px;color:var(--text)">✕</button></div>
+    ${res && res.error ? `<div class="h-empty">${_escHtml(res.error)}</div>` : list.length ? list.map(e => `<div style="padding:12px 0;border-top:1px solid var(--border)">
+      <div style="font-weight:700;font-size:15px;overflow-wrap:anywhere">${_escHtml(e.msg)}</div>
+      <div style="font-size:13px;color:var(--text2);margin-top:4px">${e.n} time${e.n > 1 ? 's' : ''} · last ${when(e.last)} · ${_escHtml(e.page || 'home')}</div>
+      <div style="font-size:12px;color:var(--text2);margin-top:2px;overflow-wrap:anywhere">${_escHtml(e.where || '')} · ${_escHtml((e.ua || '').replace(/^Mozilla\/5\.0 /, ''))}</div></div>`).join('')
+    : '<div class="h-empty">No crashes reported. 🎉</div>'}</div>`;
+  document.body.appendChild(el);
+}
 async function downloadVisitorsCSV() {
   showToast('Fetching visitor data…');
   const vRes = await apiCall('get_visitors', {}).catch(()=>null);
