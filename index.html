@@ -1029,12 +1029,13 @@ function _matchCard(m) {
   else if (stale) status = '<div class="mc-status">Not finished</div>';
   else if (never) status = '<div class="mc-status">Never started</div>';
   else status = `<div class="mc-status">${m.batting_first ? E(first) + ' to bat first' : 'Toss yet to happen'}</div>`;
-  const badge = never ? '<span class="mc-badge old">NOT STARTED</span>' : stale ? '<span class="mc-badge old">UNFINISHED</span>' : live ? '<span class="mc-badge live">● LIVE</span>' : done ? '<span class="mc-badge done">RESULT</span>' : '<span class="mc-badge soon">UPCOMING</span>';
+  const badge = never ? '<span class="mc-badge old">NOT STARTED</span>' : stale ? '<span class="mc-badge old">UNFINISHED</span>' : live ? (m.video ? '<span class="mc-badge live">● LIVE VIDEO</span>' : '<span class="mc-badge live">● LIVE</span>') : done ? '<span class="mc-badge done">RESULT</span>' : '<span class="mc-badge soon">UPCOMING</span>';
   const open = done ? `navigate('summary/${id}')` : (fresh && (mine || admin)) ? (m.batting_first ? `navigate('openers/${id}')` : `navigate('toss/${id}')`) : `navigate('live/${id}')`;
   const label = (m.team_a + ' vs ' + m.team_b).replace(/\\/g, '').replace(/'/g, "\\'");
   const acts = [];
   if ((live || stale) && (mine || admin)) acts.push(`<button class="pri" onclick="event.stopPropagation();navigate('scoring/${id}')">Score</button>`);
   if (fresh && (mine || admin)) acts.push(`<button class="pri" onclick="event.stopPropagation();${open}">Start</button>`, `<button onclick="event.stopPropagation();editMatch('${id}')">Edit</button>`);
+  if (live && m.video) acts.push(`<button class="pri" onclick="event.stopPropagation();window._lvAutoVideo='${id}';navigate('live/${id}')">▶ Watch video</button>`);
   if (live || stale || (fresh && !mine && !admin)) acts.push(`<button${mine || admin ? '' : ' class="pri"'} onclick="event.stopPropagation();navigate('live/${id}')">Watch</button>`);
   if (done) acts.push(`<button onclick="event.stopPropagation();navigate('scorecard/${id}')">Scorecard</button>`);
   acts.push(`<button class="wa" onclick="event.stopPropagation();shareOnWhatsApp('${label}','','${id}')">Share</button>`);
@@ -10971,11 +10972,13 @@ function _lvPaintScorecard() {
 function _lvStreamLoop(mid, token) {
   if(token !== LV.token) return;
   const next = ms => { _lvWatchPollTimer = setTimeout(() => _lvStreamLoop(mid, token), ms); };
+  if(!document.hidden && !LV.data) { next(1500); return; }                     // score not loaded yet: check again shortly, not in 20 s
   if(document.hidden || !LV.data || LV.data.match.status !== 'live') { if(LV.data && LV.data.match.status === 'completed') return; next(20000); return; }
   _lvCall({ action: 'get_live', match_id: mid }, 9000).then(data => {
     if(token !== LV.token) return;
     _lvStreamActive = !!(data && data.active);
     const btn = document.getElementById('lv-watch-live-btn'); if(btn) btn.style.display = _lvStreamActive ? 'block' : 'none';
+    if (window._lvAutoVideo === mid) { window._lvAutoVideo = null; if (_lvStreamActive) openLiveWatch(mid); }   // came from "Watch video" on a match card
     next(20000);
   }).catch(() => next(30000));
 }
