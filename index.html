@@ -1081,10 +1081,42 @@ function _homeHeader(title, back) {
   </div>`;
 }
 
+// Match Day (matchday.html): the booked cage, who is coming, fair teams. Home lists the coming ones.
+const MD_PAGE = 'https://neelmanibhareja-hub.github.io/box-cricket-scorer/matchday.html';
+function _loadMatchDays() {
+  return fetch('https://n8n.barandates.in/webhook/matchday', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'list' }) })
+    .then(r => r.json()).then(j => (j && j.list) || []).catch(() => []);
+}
+function _mdWhen(d) {
+  if (!d.day) return 'Match day';
+  const dt = new Date(d.day + 'T12:00:00'), today = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
+  return (d.day === today ? 'Today' : dt.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })) + (d.time_text ? ' · ' + d.time_text : '');
+}
+function _mdShare(id, when, where) {
+  const t = '🏏 Box cricket — ' + when + (where ? '\n' + where : '') + '\n\nIn / out here 👉 ' + MD_PAGE + '?m=' + id;
+  location.href = 'https://wa.me/?text=' + encodeURIComponent(t);
+}
+function _mdCards(list) {
+  if (!list.length) return '';
+  return `<div class="h-sec"><h2>Match days</h2><button onclick="location.href=MD_PAGE">+ Book</button></div><div style="display:flex;flex-direction:column;gap:10px">` + list.map(d => {
+    const when = _mdWhen(d), where = [d.court, d.venue].filter(Boolean).join(' · ');
+    return `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:14px">
+      <div style="font-size:17px;font-weight:800;color:var(--text)">📅 ${_escHtml(when)}</div>
+      <div style="font-size:13.5px;color:var(--text2);margin-top:2px">${_escHtml(where)}</div>
+      <div style="font-size:14px;font-weight:700;color:var(--brand-text);margin-top:6px">${d.ins} of ${d.max_players} in</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">
+        <button class="h-btn" onclick="location.href=MD_PAGE+'?m=${d.id}'">Open list</button>
+        <button class="h-btn" style="background:#1f9e55;color:#fff;border-color:#1f9e55" onclick='_mdShare(${JSON.stringify(d.id)}, ${JSON.stringify(when)}, ${JSON.stringify(where)})'>Share on WhatsApp</button>
+      </div></div>`;
+  }).join('') + '</div>';
+}
+
 async function renderHome() {
   _homeCss();
   app.innerHTML = _homeHeader('🏏 Box Cricket') + '<div class="flex-1 flex items-center justify-center flex-col gap-3" style="padding:40px"><div class="spin"></div></div>';
+  const mdP = _loadMatchDays();
   const ms = await _loadMatches();
+  const mds = await mdP;
   if (!_stillOn('home')) return;
   const live = ms.filter(m => m.status === 'live' && !_matchIsStale(m)).sort(_byNewest);
   const soon = ms.filter(m => m.status === 'created' && !_matchNeverStarted(m)).sort(_byNewest);
@@ -1093,6 +1125,7 @@ async function renderHome() {
   const admin = _isAdmin();
   app.innerHTML = _homeHeader('🏏 Box Cricket') + `
     <div style="flex:1;padding:4px 12px calc(86px + env(safe-area-inset-bottom,0px));background:var(--bg)">
+      ${_mdCards(mds)}
       ${ms.length ? '' : `<div class="h-empty"><div style="font-size:44px;margin-bottom:10px">🏏</div><div style="font-size:16px;font-weight:700;color:var(--text)">No matches yet</div><div style="margin-top:4px">Tap + to start your first box cricket match.</div><button class="h-start" onclick="openStartSheet()">Start a match</button></div>`}
       ${sec('Live now', live)}
       ${sec('Upcoming', soon)}
@@ -1149,6 +1182,7 @@ function openStartSheet() {
     ${item('🏆', 'Series', 'Pick captains, draft teams, play several matches', "navigate('team-draft')")}
     ${item('🎯', 'Score only', 'Just runs and wickets, no player names', "navigate('score-only')")}
     ${item('🪙', 'Toss a coin', 'Heads or tails before you start', "navigate('toss-only')")}
+    ${item('📅', 'Match day', "Book the cage, collect who's coming, make fair teams", "location.href=MD_PAGE")}
   </div>`;
   document.body.appendChild(el);
 }
