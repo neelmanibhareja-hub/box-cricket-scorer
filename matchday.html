@@ -21,6 +21,7 @@ html { font-size: 17px; }
 body { margin: 0; background: var(--bg); color: var(--text); font-family: Lexend, system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
 .wrap { max-width: 560px; margin: 0 auto; padding: 16px 16px 120px; }
 h1 { font: 700 2rem/1 'Barlow Condensed', sans-serif; letter-spacing: .02em; margin: 6px 0 12px; }
+.back { display: inline-block; color: var(--brand-text); text-decoration: none; font-weight: 700; padding: 8px 0; font-size: 1rem; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; margin: 12px 0; }
 .when { font: 700 1.6rem/1.1 'Barlow Condensed', sans-serif; }
 .where { color: var(--muted); margin-top: 4px; }
@@ -72,6 +73,7 @@ li.tap { cursor: pointer; }
 </head>
 <body>
 <div class="wrap">
+  <a href="./" class="back">‹ Box Cricket</a>
   <h1>MATCH DAY</h1>
 
   <!-- New match day (organiser) -->
@@ -116,8 +118,17 @@ li.tap { cursor: pointer; }
     </div>
 
     <div class="card hide" id="teams-card">
+      <div class="sec" style="margin-top:0">Teams</div>
       <div class="teams" id="teams"></div>
       <div class="toss" id="toss"></div>
+      <div id="team-tools" class="hide">
+        <div class="mine" id="team-hint">Make two fair teams from everyone playing (uses their runs and wickets).</div>
+        <div class="row2" style="margin-top:10px">
+          <button id="a-teams">Make fair teams</button>
+          <button id="a-toss" class="ghost">Toss</button>
+        </div>
+        <button id="a-clear" class="ghost small hide" style="margin-top:8px;width:100%">Clear teams</button>
+      </div>
     </div>
 
     <!-- Organiser -->
@@ -129,15 +140,12 @@ li.tap { cursor: pointer; }
         <button id="a-add" class="small">Add</button>
       </div>
       <div class="mine">Tap a name in the list to mark came / didn't come, move or remove them.</div>
-      <div class="row2" style="margin-top:12px">
-        <button id="a-teams" class="ghost">Make fair teams</button>
-        <button id="a-toss" class="ghost">Toss</button>
-      </div>
-      <button id="a-clear" class="ghost small hide" style="margin-top:8px;width:100%">Clear teams</button>
       <div class="sec">Links</div>
       <div class="links">Players: <b id="l-player"></b></div>
-      <div class="links" style="margin-top:6px">Organiser (keep private, or give a co-organiser): <b id="l-admin"></b></div>
-      <button id="a-copy" class="ghost small" style="margin-top:8px">Copy organiser link</button>
+      <div id="w-admin-link">
+        <div class="links" style="margin-top:6px">Organiser (keep private, or give a co-organiser): <b id="l-admin"></b></div>
+        <button id="a-copy" class="ghost small" style="margin-top:8px">Copy organiser link</button>
+      </div>
       <button id="a-new" class="ghost small" style="margin-top:8px">Book another match day</button>
     </div>
   </div>
@@ -176,9 +184,12 @@ try { if (MID && KEY) localStorage.setItem('md_key_' + MID, KEY); if (MID && !KE
 let PID = '';
 try { PID = localStorage.getItem('md_pid') || ''; if (!PID) { PID = 'p' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36).slice(-3); localStorage.setItem('md_pid', PID); } } catch (e) { PID = 'p' + Math.random().toString(36).slice(2, 14); }
 let STATE = null, STATS = {}, busy = false, sheetPid = '';
+// In the Box Cricket app's admin mode you organise every match day (the app keeps its PIN on this phone).
+let PIN = '';
+try { PIN = localStorage.getItem('cricket_admin') === 'true' ? (localStorage.getItem('cricket_admin_pin') || '') : ''; } catch (e) {}
 
 async function call(action, data) {
-  const r = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ action, id: MID, key: KEY }, data || {})) });
+  const r = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ action, id: MID, key: KEY, pin: PIN }, data || {})) });
   const j = await r.json();
   if (j.state) { STATE = j.state; render(); }
   if (!j.ok) throw new Error(j.error || 'failed');
@@ -239,7 +250,10 @@ function render() {
   if (mine && !$('me-name').value) $('me-name').value = mine.name;
   // teams and toss, for everyone
   const t = md.teams;
-  $('teams-card').classList.toggle('hide', !(t && t.a && t.a.length) && !md.toss);
+  $('teams-card').classList.toggle('hide', !(t && t.a && t.a.length) && !md.toss && !STATE.admin);
+  $('team-tools').classList.toggle('hide', !STATE.admin);
+  $('a-teams').textContent = t && t.a ? 'Reshuffle teams' : 'Make fair teams';
+  $('team-hint').textContent = t && t.a ? 'Tap a player to move them to the other team or make them captain.' : 'Make two fair teams from everyone playing (uses their runs and wickets).';
   $('teams').innerHTML = '';
   if (t && t.a) [['TEAM A', t.a], ['TEAM B', t.b]].forEach(([n, list]) => {
     const d = document.createElement('div'); d.className = 'team';
@@ -257,6 +271,7 @@ function render() {
   $('a-clear').classList.toggle('hide', !(t && t.a));
   const base = location.origin + location.pathname + '?m=' + MID;
   $('l-player').textContent = base; $('l-admin').textContent = base + '&k=' + KEY;
+  $('w-admin-link').classList.toggle('hide', !KEY);   // an app admin (PIN) has no organiser link to pass on
 }
 
 // ---------- me ----------
