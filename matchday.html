@@ -54,7 +54,16 @@ li.tap { cursor: pointer; }
 .teams { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .team h3 { margin: 0 0 6px; font: 700 1.4rem 'Barlow Condensed', sans-serif; }
 .team div { padding: 8px 0; border-bottom: 1px solid var(--line); }
-.team div.tap { cursor: pointer; }
+.team div.tap { cursor: grab; touch-action: pan-y; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.team div.drag-src { opacity: .35; }
+.cap { display: inline-block; margin-left: 8px; background: var(--gold); color: #1a1400; font-weight: 800; font-size: .72rem; border-radius: 6px; padding: 1px 6px; vertical-align: 2px; }
+.team div.drop-before { box-shadow: inset 0 3px 0 var(--gold); }
+.team.drop-end { box-shadow: inset 0 -3px 0 var(--gold); }
+.ghost-row { position: fixed; z-index: 30; pointer-events: none; background: var(--brand); color: #fff; font-weight: 700; padding: 10px 14px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.5); transform: translate(-50%, -60%); }
+.start { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.live { display: grid; gap: 8px; margin-top: 12px; }
+a.btnlink { display: block; text-align: center; text-decoration: none; font-weight: 700; border-radius: 14px; padding: 15px 12px; color: #fff; background: var(--brand); }
+a.ghostlink { background: var(--bar); color: var(--text); border: 1px solid var(--line); }
 .team div.tap::after { content: "  ⇄"; color: var(--muted); font-size: .8rem; }
 .toss { margin-top: 12px; font-size: 1.1rem; text-align: center; }
 .bar { position: fixed; left: 0; right: 0; bottom: 0; background: linear-gradient(transparent, var(--bg) 30%); padding: 18px 16px calc(14px + env(safe-area-inset-bottom)); }
@@ -128,7 +137,17 @@ li.tap { cursor: pointer; }
           <button id="a-toss" class="ghost">Toss</button>
         </div>
         <button id="a-clear" class="ghost small hide" style="margin-top:8px;width:100%">Clear teams</button>
+        <div class="start hide" id="start-box">
+          <div style="font-weight:700">Teams final? Start scoring</div>
+          <div class="row2">
+            <div><label>Team A name</label><input id="sm-a"></div>
+            <div><label>Team B name</label><input id="sm-b"></div>
+          </div>
+          <label>Overs</label><input id="sm-overs" type="number" inputmode="numeric" value="8" min="1" max="50">
+          <button id="sm-go" style="width:100%;margin-top:12px">Start match and score →</button>
+        </div>
       </div>
+      <div class="live hide" id="live-box"></div>
     </div>
 
     <!-- Organiser -->
@@ -252,15 +271,28 @@ function render() {
   const t = md.teams;
   $('teams-card').classList.toggle('hide', !(t && t.a && t.a.length) && !md.toss && !STATE.admin);
   $('team-tools').classList.toggle('hide', !STATE.admin);
-  $('a-teams').textContent = t && t.a ? 'Reshuffle teams' : 'Make fair teams';
-  $('team-hint').textContent = t && t.a ? 'Tap a player to move them to the other team or make them captain.' : 'Make two fair teams from everyone playing (uses their runs and wickets).';
+  const started = !!(t && t.match_id);
+  $('a-teams').textContent = started ? 'New teams for the next match' : t && t.a ? 'Reshuffle teams' : 'Make fair teams';
+  $('team-hint').textContent = started ? 'This match is being scored. Make new teams when it ends.'
+    : t && t.a ? 'Hold a name and drag it to the other team or up/down. The top player is captain (C) - drag someone to the top, or tap a name and choose Make captain.' : 'Make two fair teams from everyone playing (uses their runs and wickets).';
+  $('start-box').classList.toggle('hide', !(t && t.a && t.a.length) || started);
+  if (t && t.a && !$('sm-a').dataset.touched) { $('sm-a').value = t.a[0] || 'Team A'; $('sm-b').value = t.b[0] || 'Team B'; }
+  // Once a match is started from here, everyone gets the way to follow it.
+  $('live-box').classList.toggle('hide', !started);
+  if (started) {
+    const names = t.names || ['Team A', 'Team B'];
+    $('live-box').innerHTML = '<div style="font-weight:700;text-align:center">🏏 ' + esc(names[0]) + ' vs ' + esc(names[1]) + ' is on</div>'
+      + '<a class="btnlink" href="./#live/' + encodeURIComponent(t.match_id) + '">Watch live score</a>'
+      + (STATE.admin ? '<a class="btnlink ghostlink" href="./#scoring/' + encodeURIComponent(t.match_id) + '">Open the scorer</a>' : '');
+  }
   $('teams').innerHTML = '';
   if (t && t.a) [['TEAM A', t.a], ['TEAM B', t.b]].forEach(([n, list]) => {
-    const d = document.createElement('div'); d.className = 'team';
+    const d = document.createElement('div'); d.className = 'team'; d.dataset.side = n === 'TEAM A' ? 'a' : 'b';
     const h = document.createElement('h3'); h.textContent = n; d.appendChild(h);
     list.forEach((nm, i) => {
-      const r = document.createElement('div'); r.textContent = nm + (i === 0 ? '  (c)' : '');
-      if (STATE.admin) { r.className = 'tap'; r.onclick = () => openTeamSheet(n === 'TEAM A' ? 'a' : 'b', i); }
+      const r = document.createElement('div'); r.textContent = nm;
+      if (i === 0) { const c = document.createElement('span'); c.className = 'cap'; c.textContent = 'C'; c.title = 'Captain'; r.appendChild(c); }
+      if (STATE.admin && !t.match_id) dragRow(r, n === 'TEAM A' ? 'a' : 'b', i);
       d.appendChild(r);
     });
     $('teams').appendChild(d);
@@ -319,7 +351,14 @@ function makeTeams() {
   rated.forEach((x, i) => ((i % 4 === 0 || i % 4 === 3) ? A : B).push(x.n));
   return Math.random() < 0.5 ? { a: A, b: B } : { a: B, b: A };
 }
-$('a-teams').onclick = () => { const t = makeTeams(); if (t) act(() => call('admin_teams', { teams: t }).then(() => toast('Teams made - tap again to reshuffle'))); };
+$('a-teams').onclick = () => {
+  const t = makeTeams(); if (!t) return;
+  act(async () => {
+    if (STATE.md.toss) await call('admin_toss', { toss: null });
+    await call('admin_teams', { teams: t });
+    toast('Teams made - hold and drag a name to change them');
+  });
+};
 // Moving a player between teams, or making them captain (captain = first in the list).
 let tSide = '', tIdx = -1;
 function openTeamSheet(side, i) {
@@ -345,11 +384,116 @@ $('t-cap').onclick = () => {
 $('a-clear').onclick = () => act(() => call('admin_teams', { teams: null }));
 $('a-toss').onclick = () => {
   const t = STATE.md.teams, sides = t && t.a ? ['Team A (' + t.a[0] + ')', 'Team B (' + t.b[0] + ')'] : ['Team A', 'Team B'];
-  const toss = { winner: sides[Math.random() < 0.5 ? 0 : 1], choice: Math.random() < 0.5 ? 'bat' : 'bowl', at: Date.now() };
+  const k = Math.random() < 0.5 ? 0 : 1;
+  const toss = { side: k === 0 ? 'a' : 'b', winner: sides[k], choice: Math.random() < 0.5 ? 'bat' : 'bowl', at: Date.now() };
   act(() => call('admin_toss', { toss }));
 };
 $('a-copy').onclick = async () => { try { await navigator.clipboard.writeText($('l-admin').textContent); toast('Organiser link copied'); } catch (e) { prompt('Copy this link', $('l-admin').textContent); } };
 $('a-new').onclick = () => { location.href = location.pathname; };
+
+function esc(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+
+// ---------- drag a player between the teams (organiser) ----------
+// Hold a name for a moment, then drag: into the other team or up/down (the top of a team is its captain).
+// A quick tap still opens the move / captain menu. Touch and mouse both work.
+let drag = null;
+function dragRow(row, side, idx) {
+  row.className = 'tap';
+  let timer = null, sx = 0, sy = 0;
+  const begin = (x, y) => {
+    drag = { side, idx, row, ghost: document.createElement('div') };
+    drag.ghost.className = 'ghost-row'; drag.ghost.textContent = STATE.md.teams[side][idx];
+    document.body.appendChild(drag.ghost); row.classList.add('drag-src');
+    $('bar').style.visibility = 'hidden';      // the share bar must not hide the spot you are dropping on
+    if (navigator.vibrate) navigator.vibrate(15);
+    moveTo(x, y);
+  };
+  row.addEventListener('touchstart', e => {
+    const p = e.touches[0]; sx = p.clientX; sy = p.clientY;
+    timer = setTimeout(() => { timer = null; begin(sx, sy); }, 260);
+  }, { passive: true });
+  row.addEventListener('touchmove', e => {
+    const p = e.touches[0];
+    if (!drag) { if (timer && Math.hypot(p.clientX - sx, p.clientY - sy) > 10) { clearTimeout(timer); timer = null; } return; }
+    e.preventDefault(); moveTo(p.clientX, p.clientY);
+  }, { passive: false });
+  row.addEventListener('touchend', e => {
+    if (timer) { clearTimeout(timer); timer = null; e.preventDefault(); openTeamSheet(side, idx); return; }
+    if (drag) { e.preventDefault(); const p = e.changedTouches[0]; drop(p.clientX, p.clientY); }
+  });
+  row.addEventListener('mousedown', e => {
+    sx = e.clientX; sy = e.clientY;
+    const mv = ev => { if (!drag && Math.hypot(ev.clientX - sx, ev.clientY - sy) > 6) begin(ev.clientX, ev.clientY); else if (drag) moveTo(ev.clientX, ev.clientY); };
+    const up = ev => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); if (drag) drop(ev.clientX, ev.clientY); else openTeamSheet(side, idx); };
+    document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+  });
+}
+// Where would the name land: which team, and before which row.
+function target(x, y) {
+  const el = document.elementFromPoint(x, y), team = el && el.closest('.team');
+  if (!team) return null;
+  const rows = [...team.querySelectorAll('div.tap')];
+  let at = rows.length;
+  for (let i = 0; i < rows.length; i++) { const r = rows[i].getBoundingClientRect(); if (y < r.top + r.height / 2) { at = i; break; } }
+  return { side: team.dataset.side, at, rows, team };
+}
+function clearMarks() { document.querySelectorAll('.drop-before, .drop-end').forEach(e => e.classList.remove('drop-before', 'drop-end')); }
+function moveTo(x, y) {
+  drag.ghost.style.left = x + 'px'; drag.ghost.style.top = y + 'px';
+  // near the top or bottom edge the page scrolls along
+  if (y > innerHeight - 70) scrollBy(0, 12); else if (y < 70) scrollBy(0, -12);
+  clearMarks();
+  const t = target(x, y);
+  if (!t) return;
+  if (t.at < t.rows.length) t.rows[t.at].classList.add('drop-before'); else t.team.classList.add('drop-end');
+}
+function drop(x, y) {
+  const d = drag; drag = null;
+  d.ghost.remove(); d.row.classList.remove('drag-src'); clearMarks();
+  $('bar').style.visibility = '';
+  const t = target(x, y);
+  if (!t) return;
+  const teams = JSON.parse(JSON.stringify(STATE.md.teams));
+  let at = t.at;
+  if (t.side === d.side && at > d.idx) at--;
+  if (t.side === d.side && at === d.idx) return;
+  const [nm] = teams[d.side].splice(d.idx, 1);
+  teams[t.side].splice(at, 0, nm);
+  if (!teams.a.length || !teams.b.length) { toast('Each team needs at least one player'); return; }
+  STATE.md.teams = teams; render();          // show it at once, then save
+  act(() => call('admin_teams', { teams }).then(() => toast(nm + (t.side === d.side ? ' moved' : ' to Team ' + t.side.toUpperCase()))));
+}
+
+// ---------- start the match in the scorer ----------
+// Creates the match with both squads (captain first), records the toss if it was done here, and opens the
+// scorer at the openers (or the toss). The scorer key stays on this phone, as when a match is made in the app.
+['sm-a', 'sm-b'].forEach(id => $(id).addEventListener('input', () => { $('sm-a').dataset.touched = '1'; }));
+$('sm-go').onclick = () => act(async () => {
+  const md = STATE.md, t = md.teams;
+  let na = $('sm-a').value.trim().slice(0, 30) || 'Team A', nb = $('sm-b').value.trim().slice(0, 30) || 'Team B';
+  if (na.toLowerCase() === nb.toLowerCase()) nb += ' XI';
+  const overs = Math.max(1, Math.min(50, parseInt($('sm-overs').value) || 8));
+  $('sm-go').disabled = true; $('sm-go').textContent = 'Starting…';
+  try {
+    const res = await fetch(SCORER, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      action: 'create_match', kv: 1, team_a: na, team_b: nb, overs, players_per_team: Math.max(t.a.length, t.b.length),
+      team_a_players: t.a, team_b_players: t.b, ground: { name: [md.venue, md.court].filter(Boolean).join(' · ') || null } }) }).then(r => r.json());
+    if (!res.match_id || !res.scorer_key) throw new Error(res.error || 'no match');
+    try { localStorage.setItem('cricket_key_' + res.match_id, res.scorer_key); } catch (e) {}
+    let next = 'toss/' + res.match_id;
+    if (md.toss && md.toss.side) {
+      const winner = md.toss.side === 'a' ? na : nb, other = md.toss.side === 'a' ? nb : na;
+      const r2 = await fetch(SCORER, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        action: 'set_toss', match_id: res.match_id, key: res.scorer_key, toss_winner: winner, batting_first: md.toss.choice === 'bat' ? winner : other }) }).then(r => r.json()).catch(() => ({}));
+      if (r2 && !r2.error) next = 'openers/' + res.match_id;
+    }
+    await call('admin_teams', { teams: Object.assign({}, t, { match_id: res.match_id, names: [na, nb] }) });
+    location.href = './#' + next;
+  } catch (e) {
+    toast('Could not start the match - try again');
+    $('sm-go').disabled = false; $('sm-go').textContent = 'Start match and score →';
+  }
+});
 
 // ---------- WhatsApp: the same numbered list the group already uses ----------
 $('share').onclick = () => {
@@ -391,7 +535,7 @@ if (!MID) {
   const refresh = () => call('get').catch(() => { if (!STATE) $('loadmsg').textContent = 'Could not load this match day. Check the link.'; });
   refresh();
   // Keep the list fresh while the page is open.
-  setInterval(() => { if (!document.hidden && !busy && !$('sheet').classList.contains('on') && !$('tsheet').classList.contains('on')) refresh(); }, 10000);
+  setInterval(() => { if (!document.hidden && !busy && !drag && !$('sheet').classList.contains('on') && !$('tsheet').classList.contains('on') && document.activeElement.tagName !== 'INPUT') refresh(); }, 10000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 }
 </script>
